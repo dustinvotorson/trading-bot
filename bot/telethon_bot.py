@@ -1,4 +1,6 @@
 from telethon import TelegramClient, events, Button
+from proxy_settings import MT_PROXIES
+import random
 from parser.advanced_parser import advanced_parser
 from exchanges.multi_exchange import multi_exchange
 from config_telethon import API_ID, API_HASH, MONITORED_CHANNELS, BOT_TOKEN, WEB_APP_URL
@@ -32,7 +34,8 @@ except ImportError:
 
 class TelethonTradingBot:
     def __init__(self):
-        self.client = TelegramClient('trading_session', API_ID, API_HASH)
+        proxy = random.choice(MT_PROXIES)
+        self.client = TelegramClient(session, API_ID, API_HASH, proxy=proxy)
         self.active_signals = {}
         self.partial_signals = {}  # Кеш для неполных сигналов
         self.partial_signals_ttl = 300  # 5 минут TTL для неполных сигналов

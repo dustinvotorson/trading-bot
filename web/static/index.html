@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📊 Trading Signals Live</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #0d1117;
+            color: white;
+        }
+        .signal-card {
+            background: #161b22;
+            border-radius: 10px;
+            padding: 15px;
+            margin: 10px 0;
+            border-left: 4px solid #28a745;
+        }
+        .signal-short { border-left-color: #dc3545; }
+        .profit { color: #28a745; }
+        .loss { color: #dc3545; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>📈 Live Trading Signals</h2>
+        <div id="signals-container"></div>
+        <div id="stats">
+            <div>Активных сделок: <span id="active-count">0</span></div>
+            <div>Общий P&L: <span id="total-pnl" class="profit">+0.00%</span></div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        const signalsContainer = document.getElementById('signals-container');
+
+        socket.on('new_signal', function(signal) {
+            const card = document.createElement('div');
+            card.className = `signal-card ${signal.direction.toLowerCase()}`;
+            card.innerHTML = `
+                <h3>${signal.symbol} - ${signal.direction}</h3>
+                <p>Вход: ${signal.entry_prices.join(', ')}</p>
+                <p>Тейки: ${signal.take_profits.join(', ')}</p>
+                <p>Стоп: ${signal.stop_loss}</p>
+                <p class="profit">P&L: <span id="pnl-${signal.symbol}">0.00%</span></p>
+            `;
+            signalsContainer.appendChild(card);
+        });
+
+        // Здесь будет логика обновления цен в реальном времени
+    </script>
+</body>
+</html>

@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>📊 Live Trading Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary-color: #00ff88;
+            --secondary-color: #00ccff;
+            --danger-color: #ff4444;
+            --warning-color: #ffaa00;
+            --bg-dark: #0c0c0c;
+            --bg-card: rgba(255, 255, 255, 0.05);
+            --text-primary: #ffffff;
+            --text-secondary: #888;
+            --border-color: rgba(255, 255, 255, 0.1);
+            --card-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, var(--bg-dark) 0%, #1a1a2e 50%, #16213e 100%);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 10px;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+
+        .container {
+            max-width: 100%;
+            margin: 0 auto;
+        }
+
+        /* Mobile First Header */
+        .header {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: var(--bg-card);
+            border-radius: 12px;
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--border-color);
+        }
+
+        .header-main {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 1.5em;
+            background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-weight: bold;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9em;
+        }
+
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--primary-color);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        /* Mobile Navigation */
+        .nav {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 15px;
+        }
+
+        .nav-btn {
+            padding: 12px 8px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            text-decoration: none;
+            text-align: center;
+            font-size: 0.85em;
+            transition: all 0.3s ease;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .nav-btn:hover, .nav-btn:active {
+            background: rgba(255, 255, 255, 0.1);
+            transform: translateY(-1px);
+        }
+
+        /* Mobile First Dashboard */
+        .dashboard {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--border-color);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .card:active {
+            transform: scale(0.98);
+        }
+
+        .card h2 {
+            margin-bottom: 15px;
+            font-size: 1.3em;
+            color: var(--secondary-color);
+            border-bottom: 2px solid rgba(0, 204, 255, 0.3);
+            padding-bottom: 8px;
+        }
+
+        /* Signal Cards - Mobile Optimized */
+        .signal-card {
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 12px;
+            border-left: 4px solid var(--primary-color);
+        }
+
+        .signal-card.short {
+            border-left-color: var(--danger-color);
+        }
+
+        .signal-card.completed {
+            border-left-color: var(--secondary-color);
+            opacity: 0.8;
+        }
+
+        .signal-card.stopped {
+            border-left-color: var(--danger-color);
+            opacity: 0.7;
+        }
+
+        .signal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 12px;
+            gap: 10px;
+        }
+
+        .symbol {
+            font-size: 1.2em;
+            font-weight: bold;
+            word-break: break-all;
+        }
+
+        .direction {
+            padding: 4px 10px;
+            border-radius: 15px;
+            font-size: 0.8em;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .direction.long {
+            background: rgba(0, 255, 136, 0.2);
+            color: var(--primary-color);
+        }
+
+        .direction.short {
+            background: rgba(255, 68, 68, 0.2);
+            color: var(--danger-color);
+        }
+
+        /* Mobile Optimized Price Grid */
+        .price-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .price-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .price-item {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .price-label {
+            font-size: 0.8em;
+            color: var(--text-secondary);
+            margin-bottom: 3px;
+        }
+
+        .price-value {
+            font-size: 1em;
+            font-weight: bold;
+        }
+
+        .pnl {
+            font-size: 1.1em;
+            font-weight: bold;
+            text-align: center;
+            padding: 8px;
+            border-radius: 6px;
+            margin: 8px 0;
+        }
+
+        .pnl.positive {
+            background: rgba(0, 255, 136, 0.1);
+            color: var(--primary-color);
+        }
+
+        .pnl.negative {
+            background: rgba(255, 68, 68, 0.1);
+            color: var(--danger-color);
+        }
+
+        /* Take Profits - Mobile Friendly */
+        .take-profits {
+            margin-top: 12px;
+        }
+
+        .tp-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 0.85em;
+        }
+
+        .tp-item:last-child {
+            border-bottom: none;
+        }
+
+        .tp-reached {
+            color: var(--primary-color);
+            font-weight: bold;
+        }
+
+        .tp-pending {
+            color: var(--text-secondary);
+        }
+
+        /* Statistics Grid - Mobile */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .stat-item {
+            text-align: center;
+            padding: 12px 8px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+        }
+
+        .stat-value {
+            font-size: 1.4em;
+            font-weight: bold;
+            margin: 5px 0;
+        }
+
+        .stat-label {
+            color: var(--text-secondary);
+            font-size: 0.75em;
+        }
+
+        /* Tabs for Mobile */
+        .tabs {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 15px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 8px;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .tab {
+            padding: 8px 12px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.8em;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        .tab.active {
+            background: rgba(0, 204, 255, 0.2);
+            border-color: var(--secondary-color);
+        }
+
+        /* Status Badges */
+        .trade-status {
+            padding: 3px 6px;
+            border-radius: 4px;
+            font-size: 0.7em;
+            font-weight: bold;
+        }
+
+        .status-active {
+            background: rgba(0, 255, 136, 0.2);
+            color: var(--primary-color);
+        }
+
+        .status-completed {
+            background: rgba(0, 204, 255, 0.2);
+            color: var(--secondary-color);
+        }
+
+        .status-stopped {
+            background: rgba(255, 68, 68, 0.2);
+            color: var(--danger-color);
+        }
+
+        /* Utility Classes */
+        .no-signals {
+            text-align: center;
+            color: var(--text-secondary);
+            padding: 30px 20px;
+            font-style: italic;
+        }
+
+        .last-update {
+            text-align: center;
+            color: var(--text-secondary);
+            margin-top: 15px;
+            font-size: 0.8em;
+            padding: 10px;
+        }
+
+        .signal-meta {
+            margin-top: 10px;
+            font-size: 0.75em;
+            color: var(--text-secondary);
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .signal-meta span {
+            white-space: nowrap;
+        }
+
+        /* Desktop Styles */
+        @media (min-width: 768px) {
+            body {
+                padding: 20px;
+                font-size: 16px;
+            }
+
+            .container {
+                max-width: 1400px;
+            }
+
+            .header {
+                flex-direction: row;
+                justify-content: space-between;
+                align-items: center;
+                padding: 20px;
+            }
+
+            .header-main {
+                flex-direction: row;
+            }
+
+            .header h1 {
+                font-size: 2.5em;
+            }
+
+            .nav {
+                grid-template-columns: repeat(4, auto);
+                gap: 15px;
+            }
+
+            .nav-btn {
+                padding: 12px 20px;
+                font-size: 1em;
+            }
+
+            .dashboard {
+                display: grid;
+                grid-template-columns: 2fr 1fr;
+                gap: 20px;
+            }
+
+            .card {
+                padding: 25px;
+            }
+
+            .card h2 {
+                font-size: 1.5em;
+            }
+
+            .signal-card {
+                padding: 20px;
+            }
+
+            .symbol {
+                font-size: 1.4em;
+            }
+
+            .direction {
+                padding: 5px 12px;
+                font-size: 0.9em;
+            }
+
+            .price-grid {
+                grid-template-columns: 1fr 1fr;
+                gap: 15px;
+            }
+
+            .price-row {
+                grid-template-columns: 1fr 1fr;
+            }
+
+            .price-value {
+                font-size: 1.1em;
+            }
+
+            .pnl {
+                font-size: 1.3em;
+                padding: 10px;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(4, 1fr);
+                gap: 15px;
+            }
+
+            .stat-item {
+                padding: 15px;
+            }
+
+            .stat-value {
+                font-size: 2em;
+            }
+
+            .stat-label {
+                font-size: 0.9em;
+            }
+
+            .tabs {
+                gap: 10px;
+            }
+
+            .tab {
+                padding: 10px 20px;
+                font-size: 0.9em;
+            }
+
+            .signal-meta {
+                font-size: 0.9em;
+            }
+        }
+
+        /* Large Desktop */
+        @media (min-width: 1200px) {
+            .dashboard {
+                grid-template-columns: 3fr 1fr;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        /* Touch improvements */
+        @media (hover: none) and (pointer: coarse) {
+            .nav-btn:hover, .card:hover {
+                transform: none;
+            }
+
+            .nav-btn:active, .card:active {
+                transform: scale(0.95);
+            }
+
+            .tab {
+                min-height: 44px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+        }
+
+        /* Dark mode support */
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-dark: #000000;
+                --bg-card: rgba(255, 255, 255, 0.08);
+            }
+        }
+
+        /* High contrast support */
+        @media (prefers-contrast: high) {
+            :root {
+                --border-color: rgba(255, 255, 255, 0.3);
+                --bg-card: rgba(255, 255, 255, 0.1);
+            }
+        }
+
+        /* Reduced motion support */
+        @media (prefers-reduced-motion: reduce) {
+            * {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+
+            .status-indicator {
+                animation: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Mobile Optimized Header -->
+        <div class="header">
+            <div class="header-main">
+                <h1>🚀 Trading Dashboard</h1>
+                <div class="status">
+                    <div class="status-indicator"></div>
+                    <span>LIVE</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Mobile Navigation -->
+        <div class="nav">
+            <a href="/" class="nav-btn">📈 Dashboard</a>
+            <a href="/stats" class="nav-btn">📊 Statistics</a>
+            <a href="/history" class="nav-btn">📋 History</a>
+            <a href="#" class="nav-btn" onclick="refreshData()">🔄 Refresh</a>
+        </div>
+
+        <!-- Main Dashboard -->
+        <div class="dashboard">
+            <!-- Active Signals Card -->
+            <div class="card">
+                <h2>📈 Active Signals</h2>
+                <div id="signals-container">
+                    <div class="no-signals">No active signals</div>
+                </div>
+            </div>
+
+            <!-- Statistics Card -->
+            <div class="card">
+                <h2>📊 Quick Stats</h2>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-label">Active</div>
+                        <div class="stat-value" id="active-count">0</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Total P&L</div>
+                        <div class="stat-value" id="total-pnl">0.00%</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Win Rate</div>
+                        <div class="stat-value" id="win-rate">0%</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">Updated</div>
+                        <div class="stat-value" id="update-time">-</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- History Section -->
+        <div class="card">
+            <h2>📋 Trade History</h2>
+            <div class="tabs">
+                <div class="tab active" data-tab="all">All</div>
+                <div class="tab" data-tab="active">Active</div>
+                <div class="tab" data-tab="completed">Completed</div>
+                <div class="tab" data-tab="stopped">Stopped</div>
+            </div>
+            <div id="history-container">
+                Loading history...
+            </div>
+        </div>
+
+        <!-- Last Update -->
+        <div class="last-update">
+            Last update: <span id="last-update-time">Never</span>
+        </div>
+    </div>
+
+    <script>
+        let currentHistoryTab = 'all';
+        let autoRefresh = true;
+
+        // Touch-friendly tab functionality
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', (e) => {
+                // Remove active class from all tabs
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+
+                // Add active class to clicked tab
+                tab.classList.add('active');
+                currentHistoryTab = tab.getAttribute('data-tab');
+
+                // Load history for selected tab
+                loadHistory();
+
+                // Prevent any default behavior
+                e.preventDefault();
+            });
+        });
+
+        // Manual refresh function
+        function refreshData() {
+            updateDashboard();
+            // Show visual feedback
+            const event = new Event('refresh');
+            document.dispatchEvent(event);
+        }
+
+        // Enhanced function to update dashboard with history
+        function updateDashboard() {
+            if (!autoRefresh) return;
+
+            fetch('/api/data')
+                .then(response => response.json())
+                .then(data => {
+                    updateSignalsDisplay(data.active_signals, data.price_updates);
+                    updateStatistics(data.active_signals);
+                    updateLastUpdate();
+                    loadHistory();
+                })
+                .catch(error => {
+                    console.error('Error fetching data:', error);
+                    // Show error state
+                    document.querySelector('.status-indicator').style.background = '#ff4444';
+                });
+        }
+
+        function updateSignalsDisplay(activeSignals, priceUpdates) {
+    const container = document.getElementById('signals-container');
+    const signals = Object.values(activeSignals || {});
+
+    if (signals.length === 0) {
+        container.innerHTML = '<div class="no-signals">No active signals</div>';
+        return;
+    }
+
+    let html = '';
+
+    signals.forEach(signal => {
+        const symbol = signal.symbol || 'N/A';
+        const direction = (signal.direction || 'UNKNOWN').toLowerCase();
+        const currentPrice = priceUpdates[symbol]?.current_price;
+        const entryPrice = signal.entry_prices?.[0];
+        const limitPrices = signal.limit_prices || [];
+        const takeProfits = signal.take_profits || [];
+        const reachedTps = signal.reached_tps || [];
+        const entryExecuted = signal.entry_executed || priceUpdates[symbol]?.entry_executed || false;
+
+        // Рассчитываем PnL только если вход выполнен
+        let pnlPercent = 0;
+        let showPnl = false;
+
+        if (entryExecuted && currentPrice && entryPrice) {
+            showPnl = true;
+            if (direction === 'long') {
+                pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+            } else if (direction === 'short') {
+                pnlPercent = ((entryPrice - currentPrice) / entryPrice) * 100;
+            }
+        }
+
+        // Генерируем HTML для лимитных ордеров
+        let limitOrdersHtml = '';
+        if (limitPrices.length > 0 && !entryExecuted) {
+            limitOrdersHtml = `
+                <div class="limit-orders" style="margin-top: 10px; padding: 10px; background: rgba(255, 193, 7, 0.1); border-radius: 6px; border-left: 3px solid #ffc107;">
+                    <div class="price-label" style="color: #ffc107; font-weight: bold;">⏳ Лимитные ордера:</div>
+            `;
+
+            limitPrices.forEach((limitPrice, index) => {
+                const isTriggered = (direction === 'long' && currentPrice <= limitPrice) ||
+                                  (direction === 'short' && currentPrice >= limitPrice);
+                const status = isTriggered ? '🎯 ВЫПОЛНЕН' : '⏳ ОЖИДАНИЕ';
+                const statusClass = isTriggered ? 'tp-reached' : 'tp-pending';
+
+                limitOrdersHtml += `
+                    <div class="tp-item">
+                        <span>Лимит ${index + 1}: ${formatPrice(limitPrice)}</span>
+                        <span class="${statusClass}">${status}</span>
+                    </div>
+                `;
+            });
+
+            limitOrdersHtml += '</div>';
+        }
+
+        // Генерируем HTML для тейк-профитов (только если вход выполнен)
+        let takeProfitsHtml = '';
+        if (entryExecuted && takeProfits.length > 0) {
+            takeProfitsHtml = `
+                <div class="take-profits">
+                    <div class="price-label">Take Profits:</div>
+            `;
+
+            takeProfits.forEach((tp, index) => {
+                let isReached = reachedTps.includes(index);
+                const tpNumber = `TP${index + 1}`;
+                const tpStatus = isReached ? '✓ REACHED' : '⏳ PENDING';
+                const tpClass = isReached ? 'tp-reached' : 'tp-pending';
+
+                takeProfitsHtml += `
+                    <div class="tp-item">
+                        <span>${tpNumber}: ${formatPrice(tp)}</span>
+                        <span class="${tpClass}">${tpStatus}</span>
+                    </div>
+                `;
+            });
+
+            takeProfitsHtml += '</div>';
+        }
+
+        // Статус входа
+        const entryStatus = entryExecuted ?
+            `🎯 Вход выполнен: ${formatPrice(entryPrice)}` :
+            `⏳ Ожидание входа (${limitPrices.length} лимит${limitPrices.length !== 1 ? 'ов' : ''})`;
+
+        html += `
+            <div class="signal-card ${direction === 'short' ? 'short' : ''}">
+                <div class="signal-header">
+                    <div class="symbol">${symbol}</div>
+                    <div class="direction ${direction === 'short' ? 'short' : 'long'}">
+                        ${signal.direction || 'UNKNOWN'}
+                    </div>
+                </div>
+
+                <div style="margin-bottom: 10px; padding: 8px; background: ${entryExecuted ? 'rgba(0, 255, 136, 0.1)' : 'rgba(255, 193, 7, 0.1)'}; border-radius: 6px; font-size: 0.9em;">
+                    <strong>${entryStatus}</strong>
+                </div>
+
+                <div class="price-grid">
+                    <div class="price-row">
+                        <div class="price-item">
+                            <div class="price-label">Текущая цена</div>
+                            <div class="price-value">${formatPrice(currentPrice)}</div>
+                        </div>
+                        <div class="price-item">
+                            <div class="price-label">Стоп-лосс</div>
+                            <div class="price-value">${formatPrice(signal.stop_loss)}</div>
+                        </div>
+                    </div>
+                </div>
+
+                ${showPnl ? `
+                <div class="pnl ${pnlPercent >= 0 ? 'positive' : 'negative'}">
+                    P&L: ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%
+                </div>
+                ` : ''}
+
+                ${limitOrdersHtml}
+                ${takeProfitsHtml}
+
+                <div class="signal-meta">
+                    <span>${signal.source || 'Unknown'}</span>
+                    <span>${priceUpdates[symbol]?.exchange || 'Unknown'}</span>
+                    <span>${new Date().toLocaleTimeString()}</span>
+                </div>
+            </div>
+        `;
+    });
+
+    container.innerHTML = html;
+}
+
+        function updateStatistics(activeSignals) {
+            const signals = Object.values(activeSignals || {});
+
+            // Active signals count
+            document.getElementById('active-count').textContent = signals.length;
+
+            // Total P&L
+            let totalPnl = 0;
+            let profitableSignals = 0;
+
+            signals.forEach(signal => {
+                const pnl = signal.pnl_percent || 0;
+                totalPnl += pnl;
+                if (pnl > 0) profitableSignals++;
+            });
+
+            const totalPnlElement = document.getElementById('total-pnl');
+            totalPnlElement.textContent = `${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}%`;
+            totalPnlElement.style.color = totalPnl >= 0 ? 'var(--primary-color)' : 'var(--danger-color)';
+
+            // Win rate
+            const winRateElement = document.getElementById('win-rate');
+            const winRate = signals.length > 0 ? (profitableSignals / signals.length * 100) : 0;
+            winRateElement.textContent = `${winRate.toFixed(0)}%`;
+            winRateElement.style.color = winRate >= 50 ? 'var(--primary-color)' : 'var(--danger-color)';
+
+            // Update time
+            document.getElementById('update-time').textContent = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        }
+
+        function updateLastUpdate() {
+            document.getElementById('last-update-time').textContent = new Date().toLocaleString();
+        }
+
+        // History functions
+        async function loadHistory() {
+    try {
+        const params = new URLSearchParams({
+            page: 1,
+            status: currentHistoryTab
+        });
+
+        const response = await fetch(`/api/history?${params}`);
+        const data = await response.json();
+
+        // Убедимся, что данные правильно отсортированы (новые сверху)
+        const sortedHistory = (data.history || []).sort((a, b) => {
+            return (b.timestamp || 0) - (a.timestamp || 0);
+        });
+
+        renderHistory(sortedHistory);
+    } catch (error) {
+        console.error('Error loading history:', error);
+        document.getElementById('history-container').innerHTML = '<div class="no-signals">Error loading history</div>';
+    }
+}
+
+        function renderHistory(history) {
+    const container = document.getElementById('history-container');
+
+    if (history.length === 0) {
+        container.innerHTML = '<div class="no-signals">No trades found for selected filter</div>';
+        return;
+    }
+
+    let html = '';
+
+    // Show only last 5 items on mobile, more on desktop
+    const displayHistory = window.innerWidth < 768 ? history.slice(0, 5) : history.slice(0, 10);
+
+    displayHistory.forEach(trade => {
+        const isActive = !trade.close_reason;
+        const isCompleted = trade.close_reason === 'all_take_profits';
+        const isStopped = trade.close_reason === 'stop_loss';
+
+        const statusClass = isActive ? 'status-active' :
+                          isStopped ? 'status-stopped' : 'status-completed';
+        const statusText = isActive ? 'ACTIVE' :
+                         isStopped ? 'STOPPED' : 'COMPLETED';
+
+        const pnl = calculateTradePnl(trade);
+        const currentPrice = trade.close_price || trade.current_price || trade.entry_prices?.[0];
+        const timeAgo = formatTimeAgo(trade.timestamp);
+        const reachedTpsCount = trade.reached_tps ? trade.reached_tps.length : 0;
+        const totalTps = trade.take_profits ? trade.take_profits.length : 0;
+
+        html += `
+            <div class="signal-card ${isStopped ? 'stopped' : isActive ? '' : 'completed'}">
+                <div class="signal-header">
+                    <div class="symbol">${trade.symbol}</div>
+                    <div>
+                        <span class="direction ${trade.direction === 'LONG' ? 'long' : 'short'}">
+                            ${trade.direction}
+                        </span>
+                        <span class="trade-status ${statusClass}">${statusText}</span>
+                    </div>
+                </div>
+
+                <div class="price-grid">
+                    <div class="price-row">
+                        <div class="price-item">
+                            <div class="price-label">Entry</div>
+                            <div class="price-value">${formatPrice(trade.entry_prices?.[0])}</div>
+                        </div>
+                        <div class="price-item">
+                            <div class="price-label">${isActive ? 'Current' : 'Close'}</div>
+                            <div class="price-value">${formatPrice(currentPrice)}</div>
+                        </div>
+                    </div>
+                    ${isActive ? `
+                    <div class="price-row">
+                        <div class="price-item">
+                            <div class="price-label">Progress</div>
+                            <div class="price-value">${reachedTpsCount}/${totalTps} TP</div>
+                        </div>
+                        <div class="price-item">
+                            <div class="price-label">Stop Loss</div>
+                            <div class="price-value">${formatPrice(trade.stop_loss)}</div>
+                        </div>
+                    </div>
+                    ` : `
+                    <div class="price-row">
+                        <div class="price-item">
+                            <div class="price-label">Close Reason</div>
+                            <div class="price-value">${isCompleted ? 'All TPs Reached' : 'Stop Loss Hit'}</div>
+                        </div>
+                        <div class="price-item">
+                            <div class="price-label">Duration</div>
+                            <div class="price-value">${trade.duration_minutes ? trade.duration_minutes.toFixed(0) + 'm' : 'N/A'}</div>
+                        </div>
+                    </div>
+                    `}
+                </div>
+
+                <div class="pnl ${pnl >= 0 ? 'positive' : 'negative'}">
+                    ${pnl !== null ? `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%` : 'N/A'}
+                </div>
+
+                <div class="signal-meta">
+                    <span>${trade.source || 'Unknown'}</span>
+                    <span>${timeAgo}</span>
+                    ${!isActive ? `<span>${isCompleted ? '🎯 All Targets' : '🛑 Stopped'}</span>` : ''}
+                </div>
+            </div>
+        `;
+    });
+
+    // Show "show more" on mobile if there are more items
+    if (window.innerWidth < 768 && history.length > 5) {
+        html += `<div style="text-align: center; margin-top: 10px;">
+            <button onclick="showAllHistory()" style="background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-primary); padding: 8px 16px; border-radius: 6px; font-size: 0.8em;">
+                Show ${history.length - 5} more...
+            </button>
+        </div>`;
+    }
+
+    container.innerHTML = html;
+}
+
+        function showAllHistory() {
+            // Switch to desktop view or show all items
+            currentHistoryTab = 'all';
+            loadHistory();
+        }
+
+        function calculateTradePnl(trade) {
+            if (!trade.entry_prices || !trade.entry_prices[0]) return null;
+
+            const entry = trade.entry_prices[0];
+            const current = trade.close_price || (trade.current_price || entry);
+
+            if (trade.direction === 'LONG') {
+                return ((current - entry) / entry) * 100;
+            } else {
+                return ((entry - current) / entry) * 100;
+            }
+        }
+
+        function formatTimeAgo(timestamp) {
+            const diff = Date.now() / 1000 - timestamp;
+            if (diff < 60) return 'now';
+            if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+            if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+            return `${Math.floor(diff / 86400)}d`;
+        }
+
+        function formatPrice(price) {
+            if (price === undefined || price === null) return 'N/A';
+            const num = parseFloat(price);
+            if (isNaN(num)) return 'N/A';
+            if (num < 0.001) return num.toFixed(8);
+            if (num < 1) return num.toFixed(6);
+            if (num < 1000) return num.toFixed(4);
+            return num.toFixed(2);
+        }
+
+        // Handle visibility change - pause updates when tab is not visible
+        document.addEventListener('visibilitychange', function() {
+            autoRefresh = !document.hidden;
+            if (autoRefresh) {
+                updateDashboard();
+            }
+        });
+
+        // Handle page focus/blur
+        window.addEventListener('focus', function() {
+            autoRefresh = true;
+            updateDashboard();
+        });
+
+        window.addEventListener('blur', function() {
+            autoRefresh = false;
+        });
+
+        // Auto-refresh every 3 seconds
+        setInterval(updateDashboard, 3000);
+
+        // Initial load
+        updateDashboard();
+
+        // Handle resize for responsive behavior
+        window.addEventListener('resize', function() {
+            // Re-render history with appropriate item count
+            loadHistory();
+        });
+    </script>
+</body>
+</html>

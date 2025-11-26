@@ -358,12 +358,16 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
             del self.partial_signals[signal_id]
             logger.info(f"🧹 Удален устаревший частичный сигнал: {signal_id}")
     async def check_access(self, event):
-        """Проверяет доступ пользователя"""
-        user_id = event.sender_id
-        if not is_whitelisted(user_id):
-            await event.reply("❌ **Доступ запрещен**\n\nВы не в белом списке. Обратитесь к администратору.")
-            return False
-        return True
+    """Проверяет доступ пользователя - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    # Проверяем, что это личное сообщение, а не из канала
+    if not event.is_private:
+        return False  # Игнорируем сообщения из каналов/групп
+
+    user_id = event.sender_id
+    if not is_whitelisted(user_id):
+        await event.reply("❌ **Доступ запрещен**\n\nВы не в белом списке. Обратитесь к администратору.")
+        return False
+    return True
 
     async def start(self):
         """Запускает бота"""
@@ -408,7 +412,13 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
             return Button.url(text, url)
 
     async def handle_start_command(self, event):
-        """Обработчик команды /start"""
+    """Обработчик команды /start - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
+    # Проверяем, что это личное сообщение
+        if not event.is_private:
+            return
+        
+        if not await self.check_access(event):
+            return
         # Проверяем доступ
         if not await self.check_access(event):
             return
@@ -884,9 +894,13 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
             trading_data.update_signal_data(signal_data)
 
     async def handle_dashboard_command(self, event):
-        """Обработчик команды /dashboard - открывает веб-интерфейс"""
+    """Обработчик команды /dashboard - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
+        if not event.is_private:
+            return
+        
         if not await self.check_access(event):
             return
+        
 
         button = self.create_web_app_button("🚀 Открыть Trading Dashboard", WEB_APP_URL)
         await event.reply(

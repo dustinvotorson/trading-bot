@@ -88,92 +88,137 @@ class TelethonTradingBot:
         self.partial_signals_ttl = 300  # 5 минут TTL для неполных сигналов
 
     async def handle_channel_message(self, event):
-        """Обрабатывает сообщения из каналов"""
-        try:
-            message_text = event.message.text
-            chat_id = event.chat_id
+    """Обрабатывает сообщения из каналов с фильтрацией предварительных объявлений"""
+    try:
+        message_text = event.message.text
+        chat_id = event.chat_id
 
-            # Определяем источник по ID канала
-            from config_telethon import get_channel_source
-            channel_name = get_channel_source(chat_id)
+        # Определяем источник по ID канала
+        from config_telethon import get_channel_source
+        channel_name = get_channel_source(chat_id)
 
-            if not message_text:
+        if not message_text:
+            return
+
+        logger.info(f"📨 Сообщение из '{channel_name}': {message_text[:100]}...")
+
+        # Парсим сигнал
+        signal = advanced_parser.parse_signal(message_text, channel_name)
+
+        # Если символ не распознан, пропускаем
+        if signal.symbol == "UNKNOWN":
+            logger.warning(f"⚠️  Символ не распознан, пропускаем сообщение")
+            return
+
+        # 🔥 ФИЛЬТРАЦИЯ: Проверяем, что это полноценный торговый сигнал, а не предварительное объявление
+        if not self.is_valid_trading_signal(signal, message_text):
+            logger.info(f"🔕 Пропускаем предварительное объявление для {signal.symbol} - недостаточно данных")
+            return
+
+        # Для рыночных входов получаем текущую цену
+        if not signal.entry_prices and not signal.limit_prices:
+            current_price, exchange_used = await multi_exchange.get_current_price(signal.symbol)
+            if current_price:
+                signal.entry_prices = [current_price]
+                logger.info(f"💰 Рыночный вход - текущая цена {signal.symbol}: {current_price} (биржa: {exchange_used})")
+            else:
+                logger.warning(f"⚠️  Не удалось получить цену для {signal.symbol}")
                 return
 
-            logger.info(f"📨 Сообщение из '{channel_name}': {message_text[:100]}...")
+        # Сохраняем сигнал в активные
+        signal_id = f"{signal.symbol}_{int(signal.timestamp)}"
+        self.active_signals[signal_id] = signal
 
-            # ОТЛАДКА: логируем полный текст для Хрусталева
-            if channel_name == "Хрусталев":
-                logger.info(f"🔍 ПОЛНЫЙ ТЕКСТ Хрусталева:\n{message_text}")
+        # Сохраняем сигнал в trading_data для веб-интерфейса
+        signal_data = {
+            'signal_id': signal_id,
+            'symbol': signal.symbol,
+            'direction': signal.direction,
+            'entry_prices': signal.entry_prices,
+            'limit_prices': signal.limit_prices,
+            'take_profits': signal.take_profits,
+            'stop_loss': signal.stop_loss,
+            'leverage': signal.leverage,
+            'margin': signal.margin,
+            'source': signal.source,
+            'pnl_percent': 0,  # Начальный PnL
+            'reached_tps': [],
+            'exchange': 'Unknown',
+            'timestamp': signal.timestamp
+        }
+        trading_data.update_signal_data(signal_data)
+        logger.info(f"💾 Сигнал сохранен в trading_data: {signal.symbol}")
 
-            # Для Хрусталева - специальная логика объединения сообщений
-            if channel_name == "Хрусталев":
-                await self.handle_khrustalev_message(message_text, channel_name, event)
-                return
+        # Логируем успешный парсинг
+        logger.info(f"✅ СИГНАЛ РАСПОЗНАН:")
+        logger.info(f"   Символ: {signal.symbol}")
+        logger.info(f"   Направление: {signal.direction}")
+        logger.info(f"   Входы: {signal.entry_prices}")
+        logger.info(f"   Лимитные входы: {signal.limit_prices}")
+        logger.info(f"   Тейки: {signal.take_profits}")
+        logger.info(f"   Стоп: {signal.stop_loss}")
+        logger.info(f"   Плечо: {signal.leverage}")
+        logger.info(f"   Маржа: {signal.margin}")
+        logger.info(f"   Источник: {signal.source}")
+        logger.info("-" * 60)
 
-            # Стандартная обработка для других источников
-            logger.info(f"📨 Сообщение из '{channel_name}': {message_text[:100]}...")
+        # Запускаем мониторинг цены для этого сигнала
+        asyncio.create_task(self.monitor_signal(signal_id))
 
-            # Парсим сигнал
-            signal = advanced_parser.parse_signal(message_text, channel_name)
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки сообщения: {e}")
 
-            # Если символ не распознан, пропускаем
-            if signal.symbol == "UNKNOWN":
-                logger.warning(f"⚠️  Символ не распознан, пропускаем сообщение")
-                return
+def is_valid_trading_signal(self, signal, message_text: str) -> bool:
+    """Проверяет, является ли сообщение полноценным торговым сигналом"""
+    
+    # Минимальные требования для торгового сигнала:
+    # 1. Должны быть указаны цены входа (entry_prices или limit_prices)
+    has_entry_prices = bool(signal.entry_prices or signal.limit_prices)
+    
+    # 2. Должны быть указаны тейк-профиты ИЛИ стоп-лосс
+    has_trading_levels = bool(signal.take_profits or signal.stop_loss)
+    
+    # 3. Проверяем, что в сообщении есть конкретные числовые данные
+    has_concrete_data = self.has_concrete_trading_data(message_text)
+    
+    # Сигнал валиден, если есть все необходимое
+    is_valid = has_entry_prices and has_trading_levels and has_concrete_data
+    
+    if not is_valid:
+        logger.info(f"🔍 Проверка сигнала {signal.symbol}: "
+                   f"entry_prices={has_entry_prices}, "
+                   f"trading_levels={has_trading_levels}, "
+                   f"concrete_data={has_concrete_data}")
+    
+    return is_valid
 
-            # Для рыночных входов получаем текущую цену
-            if not signal.entry_prices and not signal.limit_prices:
-                current_price, exchange_used = await multi_exchange.get_current_price(signal.symbol)
-                if current_price:
-                    signal.entry_prices = [current_price]
-                    logger.info(
-                        f"💰 Рыночный вход - текущая цена {signal.symbol}: {current_price} (биржa: {exchange_used})")
-                else:
-                    logger.warning(f"⚠️  Не удалось получить цену для {signal.symbol}")
-
-            # Сохраняем сигнал в активные
-            signal_id = f"{signal.symbol}_{int(signal.timestamp)}"
-            self.active_signals[signal_id] = signal
-
-            # Сохраняем сигнал в trading_data для веб-интерфейса
-            signal_data = {
-                'signal_id': signal_id,
-                'symbol': signal.symbol,
-                'direction': signal.direction,
-                'entry_prices': signal.entry_prices,
-                'limit_prices': signal.limit_prices,
-                'take_profits': signal.take_profits,
-                'stop_loss': signal.stop_loss,
-                'leverage': signal.leverage,
-                'margin': signal.margin,
-                'source': signal.source,
-                'pnl_percent': 0,  # Начальный PnL
-                'reached_tps': [],
-                'exchange': 'Unknown',
-                'timestamp': signal.timestamp
-            }
-            trading_data.update_signal_data(signal_data)
-            logger.info(f"💾 Сигнал сохранен в trading_data: {signal.symbol}")
-
-            # Логируем успешный парсинг
-            logger.info(f"✅ СИГНАЛ РАСПОЗНАН:")
-            logger.info(f"   Символ: {signal.symbol}")
-            logger.info(f"   Направление: {signal.direction}")
-            logger.info(f"   Входы: {signal.entry_prices}")
-            logger.info(f"   Лимитные входы: {signal.limit_prices}")
-            logger.info(f"   Тейки: {signal.take_profits}")
-            logger.info(f"   Стоп: {signal.stop_loss}")
-            logger.info(f"   Плечо: {signal.leverage}")
-            logger.info(f"   Маржа: {signal.margin}")
-            logger.info(f"   Источник: {signal.source}")
-            logger.info("-" * 60)
-
-            # Запускаем мониторинг цены для этого сигнала
-            asyncio.create_task(self.monitor_signal(signal_id))
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки сообщения: {e}")
+def has_concrete_trading_data(self, message_text: str) -> bool:
+    """Проверяет, содержит ли сообщение конкретные торговые данные"""
+    # Ищем конкретные числовые паттерны, указывающие на торговые инструкции
+    concrete_patterns = [
+        r'\d+[.,]\d+\s*\$',  # Цены с долларом: 0.48$, 3$
+        r'[TТ][PП]\d*\s*:?\s*\d+[.,]\d+',  # TP1: 0.48, ТП2: 0.58
+        r'тейк\s*профит',  # Упоминание тейк-профитов
+        r'стоп\s*лосс',    # Упоминание стоп-лосса
+        r'вход\s*:?\s*\d+[.,]\d+',  # Вход: 0.9
+        r'добор\s*\d+[.,]\d+',  # Добор 0.78
+        r'лимитный\s*ордер',  # Лимитный ордер
+        r'маржа\s*\d+',  # Маржа 0.3%
+        r'фикс\s*\d+%',  # Фикс 20% объема
+    ]
+    
+    clean_text = message_text.lower().replace(' ', '')
+    
+    for pattern in concrete_patterns:
+        if re.search(pattern, message_text, re.IGNORECASE):
+            return True
+    
+    # Дополнительная проверка: должно быть достаточно чисел для торговли
+    numbers = re.findall(r'\d+[.,]\d+', message_text)
+    if len(numbers) >= 3:  # Если есть хотя бы 3 числа (вход + тейки/стоп)
+        return True
+    
+    return False
     async def handle_khrustalev_message(self, text: str, source: str, event):
         """Обработка сообщений от Хрусталева с временным окном 3 минуты"""
         try:

@@ -33,9 +33,56 @@ except ImportError:
 
 
 class TelethonTradingBot:
+    class TelethonTradingBot:
     def __init__(self):
-        proxy = random.choice(MT_PROXIES)
-        self.client = TelegramClient(session, API_ID, API_HASH, proxy=proxy)
+        """
+        Инициализация клиента Telethon:
+        - имя сессии берём в порядке: config_telethon.SESSION_NAME -> .env SESSION_NAME -> "trading_session"
+        - прокси берём из proxy_settings.MT_PROXIES (random.choice). Если прокси нет — используем None (прямое подключение).
+        - proxy приводим к формату, который Telethon ожидает.
+        """
+        # 1) Получаем имя сессии (файл сессии Telethon)
+        try:
+            from config_telethon import SESSION_NAME as CONFIG_SESSION_NAME
+        except Exception:
+            CONFIG_SESSION_NAME = None
+
+        session_name = CONFIG_SESSION_NAME or os.getenv("SESSION_NAME") or "trading_session"
+        session = session_name  # Telethon создаст файл session_name.session
+
+        # 2) Берём прокси из proxy_settings (если есть). Превращаем в формат telethon.
+        try:
+            import proxy_settings
+            raw_proxy = random.choice(proxy_settings.MT_PROXIES)
+        except Exception:
+            raw_proxy = None
+
+        def build_proxy_arg(p):
+            if p is None:
+                return None
+            if isinstance(p, (tuple, list)):
+                return tuple(p)
+            if isinstance(p, dict):
+                p_type = p.get("type", "socks5")
+                host = p.get("host")
+                port = p.get("port")
+                if not host or not port:
+                    return None
+                rdns = p.get("rdns", True)
+                username = p.get("username")
+                password = p.get("password")
+                if username:
+                    return (p_type, host, int(port), rdns, username, password)
+                return (p_type, host, int(port))
+            return None
+
+        proxy_arg = build_proxy_arg(raw_proxy)
+
+        # 3) Создаём клиента Telethon (используем session имя и proxy_arg)
+        #    (API_ID и API_HASH импортированы сверху из config_telethon)
+        self.client = TelegramClient(session, API_ID, API_HASH, proxy=proxy_arg)
+
+        # 4) Обычные поля класса
         self.active_signals = {}
         self.partial_signals = {}  # Кеш для неполных сигналов
         self.partial_signals_ttl = 300  # 5 минут TTL для неполных сигналов

@@ -35,7 +35,44 @@ class AdvancedSignalParser:
             'ARTEMA': ['артема'],
             'KHRUSTALEV': ['хрусталев', 'khrustalev']
         }
-
+    def is_preliminary_announcement(self, text: str) -> bool:
+    """Определяет, является ли сообщение предварительным объявлением"""
+    text_lower = text.lower()
+    
+    # Паттерны, указывающие на предварительное объявление
+    preliminary_patterns = [
+        r'готовься',
+        r'приготовь',
+        r'скоро',
+        r'будет',
+        r'следи',
+        r'внимание',
+        r'объявляю',
+        r'анонс',
+        r'предупреждение',
+        r'жду',
+        r'ожидай',
+        r'следующ',
+    ]
+    
+    # Если есть эти слова и мало конкретных данных
+    has_preliminary_keywords = any(re.search(pattern, text_lower) for pattern in preliminary_patterns)
+    
+    # Считаем количество конкретных торговых данных
+    trading_data_patterns = [
+        r'\d+[.,]\d+\s*\$',
+        r'[TТ][PП]\d*\s*:?\s*\d+[.,]\d+',
+        r'стоп\s*лосс\s*\d+[.,]\d+',
+        r'вход\s*:?\s*\d+[.,]\d+',
+    ]
+    
+    concrete_data_count = sum(1 for pattern in trading_data_patterns if re.search(pattern, text, re.IGNORECASE))
+    
+    # Если есть ключевые слова предварительного объявления и мало конкретных данных
+    if has_preliminary_keywords and concrete_data_count < 2:
+        return True
+        
+    return False
     def extract_all_numbers(self, text: str) -> List[float]:
         """Извлекает все числа из текста"""
         numbers = []
@@ -690,33 +727,32 @@ class AdvancedSignalParser:
             return channel_source
 
     def parse_signal(self, text: str, source: str) -> TradeSignal:
-        """Основной метод парсинга - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
-        logger.info(f"🔍 Parsing signal from: {source}")
-
-        # Определяем источник
-        detected_source = self.detect_source(text, source)
-        logger.info(f"🔍 Detected source: {detected_source}")
-
-        # Извлекаем символ
-        symbol = self.extract_symbol_improved(text)
-        logger.info(f"🔍 Symbol: {symbol}")
-
-        # Направление
-        direction = self.extract_direction(text)
-        logger.info(f"🔍 Direction: {direction}")
-
-        # Плечо
-        leverage = self.extract_leverage(text)
-        logger.info(f"🔍 Leverage: {leverage}")
-
-        # Маржа
-        margin = self.extract_margin(text)
-
-        # Парсим в зависимости от источника
-        entry_prices = []
-        limit_prices = []
-        take_profits = []
-        stop_loss = None
+    """Основной метод парсинга - с проверкой на предварительные объявления"""
+    logger.info(f"🔍 Parsing signal from: {source}")
+    
+    # Проверяем, не является ли это предварительным объявлением
+    if self.is_preliminary_announcement(text):
+        logger.info("🔕 Обнаружено предварительное объявление, пропускаем")
+        return TradeSignal(
+            symbol="UNKNOWN",
+            direction="UNKNOWN",
+            entry_prices=[],
+            limit_prices=[],
+            take_profits=[],
+            stop_loss=None,
+            leverage=None,
+            margin=None,
+            source=source,
+            timestamp=time.time()
+        )
+    
+    # Остальной код парсинга без изменений...
+    logger.info(f"🔍 Text preview: {text[:200]}...")
+    
+    detected_source = self.detect_source(text, source)
+    logger.info(f"🔍 Detected source: {detected_source}")
+    
+    
 
         if detected_source == "WOLF_TRADING":
             entry_prices, limit_prices, take_profits, stop_loss = self.parse_wolf_trading(text)

@@ -495,6 +495,8 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
 
     async def handle_admin_command(self, event):
         """Обработчик команды /admin"""
+        if not event.is_private:
+            return
         if not is_admin(event.sender_id):
             await event.reply("❌ Эта команда только для администраторов")
             return
@@ -531,6 +533,8 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
 
     async def handle_add_user_command(self, event):
         """Добавление пользователя в белый список"""
+        if not event.is_private:
+            return
         if not is_admin(event.sender_id):
             await event.reply("❌ Эта команда только для администраторов")
             return
@@ -567,6 +571,8 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
 
     async def handle_list_users_command(self, event):
         """Показать список пользователей"""
+        if not event.is_private:
+            return
         if not is_admin(event.sender_id):
             await event.reply("❌ Эта команда только для администраторов")
             return
@@ -584,6 +590,8 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
 
     async def handle_edit_signal_command(self, event):
         """Редактирование параметров сделки"""
+        if not event.is_private:
+            return
         if not is_admin(event.sender_id):
             await event.reply("❌ Эта команда только для администраторов")
             return
@@ -643,6 +651,8 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
 
     async def handle_admin_help_command(self, event):
         """Обработчик команды /adminhelp - расширенная помощь для админов"""
+        if not event.is_private:
+            return
         if not is_admin(event.sender_id):
             await event.reply("❌ Эта команда только для администраторов")
             return
@@ -687,6 +697,8 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
 
     async def handle_add_signal_command(self, event):
         """Обработчик команды /addsignal - ручное добавление сделки"""
+        if not event.is_private:
+            return
         if not is_admin(event.sender_id):
             await event.reply("❌ Эта команда только для администраторов")
             return
@@ -817,6 +829,8 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
 
     async def handle_active_signals_command(self, event):
         """Показывает активные сделки с их ID для редактирования"""
+        if not event.is_private:
+            return
         if not is_admin(event.sender_id):
             await event.reply("❌ Эта команда только для администраторов")
             return
@@ -910,9 +924,13 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
         )
 
     async def handle_stats_command(self, event):
-        """Обработчик команды /stats - показывает статистику"""
+    """Обработчик команды /stats - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
+        if not event.is_private:
+            return
+        
         if not await self.check_access(event):
             return
+
 
         active_signals_count = len(self.active_signals)
 
@@ -950,9 +968,13 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
         await event.reply(stats_text, buttons=button)
 
     async def handle_active_command(self, event):
-        """Обработчик команды /active - показывает активные сделки"""
+    """Обработчик команды /active - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
+        if not event.is_private:
+            return
+        
         if not await self.check_access(event):
             return
+
 
         if not self.active_signals:
             await event.reply("🔄 **Активные сделки**\n\nНет активных сделок")
@@ -996,7 +1018,10 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
             await self.handle_admin_command(event)
 
     async def handle_help_command(self, event):
-        """Обработчик команды помощи"""
+    """Обработчик команды помощи - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
+        if not event.is_private:
+            return
+        
         if not await self.check_access(event):
             return
 

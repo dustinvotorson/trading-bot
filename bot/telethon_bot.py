@@ -471,9 +471,15 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
         await event.reply(welcome_text, buttons=buttons, link_preview=False)
 
     async def handle_callback_query(self, event):
-        """Обработчик нажатий на inline кнопки"""
+    """Обработчик нажатий на inline кнопки - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
+        if not event.is_private:
+            await event.answer()  # Просто отвечаем, но ничего не делаем
+            return
+
         if not await self.check_access(event):
             return
+
+    
 
         data = event.data.decode('utf-8') if event.data else ''
 
@@ -1003,6 +1009,8 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
 
     async def handle_text_messages(self, event):
         """Обработчик текстовых сообщений (кнопки)"""
+        if not event.is_private:
+            return
         if not await self.check_access(event):
             return
 

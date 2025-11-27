@@ -9,7 +9,10 @@ from web.app import get_trading_data
 import logging
 import asyncio
 import time
+import os
+import re
 from config_telethon import get_channel_source
+
 # MONITORED_CHANNELS = [-1002972873621]
 logger = logging.getLogger(__name__)
 
@@ -26,14 +29,12 @@ except ImportError:
     HAS_WEB_APP_SUPPORT = False
     logger.warning("⚠️  InputWebAppInfo не доступен, используем fallback")
 
-
     class InputWebAppInfo:
         def __init__(self, url):
             self.url = url
 
 
 class TelethonTradingBot:
-    class TelethonTradingBot:
     def __init__(self):
         """
         Инициализация клиента Telethon:
@@ -85,140 +86,147 @@ class TelethonTradingBot:
         # 4) Обычные поля класса
         self.active_signals = {}
         self.partial_signals = {}  # Кеш для неполных сигналов
+        self.partial_khrustalev_signals = {}  # Кеш для сигналов Хрусталева
         self.partial_signals_ttl = 300  # 5 минут TTL для неполных сигналов
+        self.khrustalev_timeout = 180  # 3 минуты для объединения сигналов Хрусталева
 
     async def handle_channel_message(self, event):
-    """Обрабатывает сообщения из каналов с фильтрацией предварительных объявлений"""
-    try:
-        message_text = event.message.text
-        chat_id = event.chat_id
+        """Обрабатывает сообщения из каналов с фильтрацией предварительных объявлений"""
+        try:
+            message_text = event.message.text
+            chat_id = event.chat_id
 
-        # Определяем источник по ID канала
-        from config_telethon import get_channel_source
-        channel_name = get_channel_source(chat_id)
+            # Определяем источник по ID канала
+            channel_name = get_channel_source(chat_id)
 
-        if not message_text:
-            return
-
-        logger.info(f"📨 Сообщение из '{channel_name}': {message_text[:100]}...")
-
-        # Парсим сигнал
-        signal = advanced_parser.parse_signal(message_text, channel_name)
-
-        # Если символ не распознан, пропускаем
-        if signal.symbol == "UNKNOWN":
-            logger.warning(f"⚠️  Символ не распознан, пропускаем сообщение")
-            return
-
-        # 🔥 ФИЛЬТРАЦИЯ: Проверяем, что это полноценный торговый сигнал, а не предварительное объявление
-        if not self.is_valid_trading_signal(signal, message_text):
-            logger.info(f"🔕 Пропускаем предварительное объявление для {signal.symbol} - недостаточно данных")
-            return
-
-        # Для рыночных входов получаем текущую цену
-        if not signal.entry_prices and not signal.limit_prices:
-            current_price, exchange_used = await multi_exchange.get_current_price(signal.symbol)
-            if current_price:
-                signal.entry_prices = [current_price]
-                logger.info(f"💰 Рыночный вход - текущая цена {signal.symbol}: {current_price} (биржa: {exchange_used})")
-            else:
-                logger.warning(f"⚠️  Не удалось получить цену для {signal.symbol}")
+            if not message_text:
                 return
 
-        # Сохраняем сигнал в активные
-        signal_id = f"{signal.symbol}_{int(signal.timestamp)}"
-        self.active_signals[signal_id] = signal
+            logger.info(f"📨 Сообщение из '{channel_name}': {message_text[:100]}...")
 
-        # Сохраняем сигнал в trading_data для веб-интерфейса
-        signal_data = {
-            'signal_id': signal_id,
-            'symbol': signal.symbol,
-            'direction': signal.direction,
-            'entry_prices': signal.entry_prices,
-            'limit_prices': signal.limit_prices,
-            'take_profits': signal.take_profits,
-            'stop_loss': signal.stop_loss,
-            'leverage': signal.leverage,
-            'margin': signal.margin,
-            'source': signal.source,
-            'pnl_percent': 0,  # Начальный PnL
-            'reached_tps': [],
-            'exchange': 'Unknown',
-            'timestamp': signal.timestamp
-        }
-        trading_data.update_signal_data(signal_data)
-        logger.info(f"💾 Сигнал сохранен в trading_data: {signal.symbol}")
+            # Для Хрусталева используем специальный обработчик
+            if "khrustalev" in channel_name.lower():
+                await self.handle_khrustalev_message(message_text, channel_name, event)
+                return
 
-        # Логируем успешный парсинг
-        logger.info(f"✅ СИГНАЛ РАСПОЗНАН:")
-        logger.info(f"   Символ: {signal.symbol}")
-        logger.info(f"   Направление: {signal.direction}")
-        logger.info(f"   Входы: {signal.entry_prices}")
-        logger.info(f"   Лимитные входы: {signal.limit_prices}")
-        logger.info(f"   Тейки: {signal.take_profits}")
-        logger.info(f"   Стоп: {signal.stop_loss}")
-        logger.info(f"   Плечо: {signal.leverage}")
-        logger.info(f"   Маржа: {signal.margin}")
-        logger.info(f"   Источник: {signal.source}")
-        logger.info("-" * 60)
+            # Парсим сигнал
+            signal = advanced_parser.parse_signal(message_text, channel_name)
 
-        # Запускаем мониторинг цены для этого сигнала
-        asyncio.create_task(self.monitor_signal(signal_id))
+            # Если символ не распознан, пропускаем
+            if signal.symbol == "UNKNOWN":
+                logger.warning(f"⚠️  Символ не распознан, пропускаем сообщение")
+                return
 
-    except Exception as e:
-        logger.error(f"❌ Ошибка обработки сообщения: {e}")
+            # 🔥 ФИЛЬТРАЦИЯ: Проверяем, что это полноценный торговый сигнал, а не предварительное объявление
+            if not self.is_valid_trading_signal(signal, message_text):
+                logger.info(f"🔕 Пропускаем предварительное объявление для {signal.symbol} - недостаточно данных")
+                return
 
-def is_valid_trading_signal(self, signal, message_text: str) -> bool:
-    """Проверяет, является ли сообщение полноценным торговым сигналом"""
-    
-    # Минимальные требования для торгового сигнала:
-    # 1. Должны быть указаны цены входа (entry_prices или limit_prices)
-    has_entry_prices = bool(signal.entry_prices or signal.limit_prices)
-    
-    # 2. Должны быть указаны тейк-профиты ИЛИ стоп-лосс
-    has_trading_levels = bool(signal.take_profits or signal.stop_loss)
-    
-    # 3. Проверяем, что в сообщении есть конкретные числовые данные
-    has_concrete_data = self.has_concrete_trading_data(message_text)
-    
-    # Сигнал валиден, если есть все необходимое
-    is_valid = has_entry_prices and has_trading_levels and has_concrete_data
-    
-    if not is_valid:
-        logger.info(f"🔍 Проверка сигнала {signal.symbol}: "
-                   f"entry_prices={has_entry_prices}, "
-                   f"trading_levels={has_trading_levels}, "
-                   f"concrete_data={has_concrete_data}")
-    
-    return is_valid
+            # Для рыночных входов получаем текущую цену
+            if not signal.entry_prices and not signal.limit_prices:
+                current_price, exchange_used = await multi_exchange.get_current_price(signal.symbol)
+                if current_price:
+                    signal.entry_prices = [current_price]
+                    logger.info(f"💰 Рыночный вход - текущая цена {signal.symbol}: {current_price} (биржa: {exchange_used})")
+                else:
+                    logger.warning(f"⚠️  Не удалось получить цену для {signal.symbol}")
+                    return
 
-def has_concrete_trading_data(self, message_text: str) -> bool:
-    """Проверяет, содержит ли сообщение конкретные торговые данные"""
-    # Ищем конкретные числовые паттерны, указывающие на торговые инструкции
-    concrete_patterns = [
-        r'\d+[.,]\d+\s*\$',  # Цены с долларом: 0.48$, 3$
-        r'[TТ][PП]\d*\s*:?\s*\d+[.,]\d+',  # TP1: 0.48, ТП2: 0.58
-        r'тейк\s*профит',  # Упоминание тейк-профитов
-        r'стоп\s*лосс',    # Упоминание стоп-лосса
-        r'вход\s*:?\s*\d+[.,]\d+',  # Вход: 0.9
-        r'добор\s*\d+[.,]\d+',  # Добор 0.78
-        r'лимитный\s*ордер',  # Лимитный ордер
-        r'маржа\s*\d+',  # Маржа 0.3%
-        r'фикс\s*\d+%',  # Фикс 20% объема
-    ]
-    
-    clean_text = message_text.lower().replace(' ', '')
-    
-    for pattern in concrete_patterns:
-        if re.search(pattern, message_text, re.IGNORECASE):
+            # Сохраняем сигнал в активные
+            signal_id = f"{signal.symbol}_{int(signal.timestamp)}"
+            self.active_signals[signal_id] = signal
+
+            # Сохраняем сигнал в trading_data для веб-интерфейса
+            signal_data = {
+                'signal_id': signal_id,
+                'symbol': signal.symbol,
+                'direction': signal.direction,
+                'entry_prices': signal.entry_prices,
+                'limit_prices': signal.limit_prices,
+                'take_profits': signal.take_profits,
+                'stop_loss': signal.stop_loss,
+                'leverage': signal.leverage,
+                'margin': signal.margin,
+                'source': signal.source,
+                'pnl_percent': 0,  # Начальный PnL
+                'reached_tps': [],
+                'exchange': 'Unknown',
+                'timestamp': signal.timestamp
+            }
+            trading_data.update_signal_data(signal_data)
+            logger.info(f"💾 Сигнал сохранен в trading_data: {signal.symbol}")
+
+            # Логируем успешный парсинг
+            logger.info(f"✅ СИГНАЛ РАСПОЗНАН:")
+            logger.info(f"   Символ: {signal.symbol}")
+            logger.info(f"   Направление: {signal.direction}")
+            logger.info(f"   Входы: {signal.entry_prices}")
+            logger.info(f"   Лимитные входы: {signal.limit_prices}")
+            logger.info(f"   Тейки: {signal.take_profits}")
+            logger.info(f"   Стоп: {signal.stop_loss}")
+            logger.info(f"   Плечо: {signal.leverage}")
+            logger.info(f"   Маржа: {signal.margin}")
+            logger.info(f"   Источник: {signal.source}")
+            logger.info("-" * 60)
+
+            # Запускаем мониторинг цены для этого сигнала
+            asyncio.create_task(self.monitor_signal(signal_id))
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки сообщения: {e}")
+
+    def is_valid_trading_signal(self, signal, message_text: str) -> bool:
+        """Проверяет, является ли сообщение полноценным торговым сигналом"""
+        
+        # Минимальные требования для торгового сигнала:
+        # 1. Должны быть указаны цены входа (entry_prices или limit_prices)
+        has_entry_prices = bool(signal.entry_prices or signal.limit_prices)
+        
+        # 2. Должны быть указаны тейк-профиты ИЛИ стоп-лосс
+        has_trading_levels = bool(signal.take_profits or signal.stop_loss)
+        
+        # 3. Проверяем, что в сообщении есть конкретные числовые данные
+        has_concrete_data = self.has_concrete_trading_data(message_text)
+        
+        # Сигнал валиден, если есть все необходимое
+        is_valid = has_entry_prices and has_trading_levels and has_concrete_data
+        
+        if not is_valid:
+            logger.info(f"🔍 Проверка сигнала {signal.symbol}: "
+                       f"entry_prices={has_entry_prices}, "
+                       f"trading_levels={has_trading_levels}, "
+                       f"concrete_data={has_concrete_data}")
+        
+        return is_valid
+
+    def has_concrete_trading_data(self, message_text: str) -> bool:
+        """Проверяет, содержит ли сообщение конкретные торговые данные"""
+        # Ищем конкретные числовые паттерны, указывающие на торговые инструкции
+        concrete_patterns = [
+            r'\d+[.,]\d+\s*\$',  # Цены с долларом: 0.48$, 3$
+            r'[TТ][PП]\d*\s*:?\s*\d+[.,]\d+',  # TP1: 0.48, ТП2: 0.58
+            r'тейк\s*профит',  # Упоминание тейк-профитов
+            r'стоп\s*лосс',    # Упоминание стоп-лосса
+            r'вход\s*:?\s*\d+[.,]\d+',  # Вход: 0.9
+            r'добор\s*\d+[.,]\d+',  # Добор 0.78
+            r'лимитный\s*ордер',  # Лимитный ордер
+            r'маржа\s*\d+',  # Маржа 0.3%
+            r'фикс\s*\d+%',  # Фикс 20% объема
+        ]
+        
+        clean_text = message_text.lower().replace(' ', '')
+        
+        for pattern in concrete_patterns:
+            if re.search(pattern, message_text, re.IGNORECASE):
+                return True
+        
+        # Дополнительная проверка: должно быть достаточно чисел для торговли
+        numbers = re.findall(r'\d+[.,]\d+', message_text)
+        if len(numbers) >= 3:  # Если есть хотя бы 3 числа (вход + тейки/стоп)
             return True
-    
-    # Дополнительная проверка: должно быть достаточно чисел для торговли
-    numbers = re.findall(r'\d+[.,]\d+', message_text)
-    if len(numbers) >= 3:  # Если есть хотя бы 3 числа (вход + тейки/стоп)
-        return True
-    
-    return False
+        
+        return False
+
     async def handle_khrustalev_message(self, text: str, source: str, event):
         """Обработка сообщений от Хрусталева с временным окном 3 минуты"""
         try:
@@ -357,17 +365,18 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
         if signal_id in self.partial_signals:
             del self.partial_signals[signal_id]
             logger.info(f"🧹 Удален устаревший частичный сигнал: {signal_id}")
-    async def check_access(self, event):
-    """Проверяет доступ пользователя - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
-    # Проверяем, что это личное сообщение, а не из канала
-    if not event.is_private:
-        return False  # Игнорируем сообщения из каналов/групп
 
-    user_id = event.sender_id
-    if not is_whitelisted(user_id):
-        await event.reply("❌ **Доступ запрещен**\n\nВы не в белом списке. Обратитесь к администратору.")
-        return False
-    return True
+    async def check_access(self, event):
+        """Проверяет доступ пользователя - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+        # Проверяем, что это личное сообщение, а не из канала
+        if not event.is_private:
+            return False  # Игнорируем сообщения из каналов/групп
+
+        user_id = event.sender_id
+        if not is_whitelisted(user_id):
+            await event.reply("❌ **Доступ запрещен**\n\nВы не в белом списке. Обратитесь к администратору.")
+            return False
+        return True
 
     async def start(self):
         """Запускает бота"""
@@ -383,14 +392,14 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
 
         # Админские команды
         self.client.add_event_handler(self.handle_admin_command, events.NewMessage(pattern='/admin'))
-        self.client.add_event_handler(self.handle_admin_help_command, events.NewMessage(pattern='/adminhelp'))  # НОВОЕ
+        self.client.add_event_handler(self.handle_admin_help_command, events.NewMessage(pattern='/adminhelp'))
         self.client.add_event_handler(self.handle_add_user_command, events.NewMessage(pattern='/adduser'))
         self.client.add_event_handler(self.handle_remove_user_command, events.NewMessage(pattern='/removeuser'))
         self.client.add_event_handler(self.handle_list_users_command, events.NewMessage(pattern='/listusers'))
         self.client.add_event_handler(self.handle_edit_signal_command, events.NewMessage(pattern='/editsignal'))
-        self.client.add_event_handler(self.handle_add_signal_command, events.NewMessage(pattern='/addsignal'))  # НОВОЕ
+        self.client.add_event_handler(self.handle_add_signal_command, events.NewMessage(pattern='/addsignal'))
         self.client.add_event_handler(self.handle_active_signals_command,
-                                      events.NewMessage(pattern='/activesignals'))  # НОВОЕ
+                                      events.NewMessage(pattern='/activesignals'))
 
         # Обработчик текстовых сообщений (кнопки)
         self.client.add_event_handler(self.handle_text_messages, events.NewMessage)
@@ -412,14 +421,11 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
             return Button.url(text, url)
 
     async def handle_start_command(self, event):
-    """Обработчик команды /start - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
-    # Проверяем, что это личное сообщение
+        """Обработчик команды /start - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
+        # Проверяем, что это личное сообщение
         if not event.is_private:
             return
         
-        if not await self.check_access(event):
-            return
-        # Проверяем доступ
         if not await self.check_access(event):
             return
 
@@ -471,15 +477,13 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
         await event.reply(welcome_text, buttons=buttons, link_preview=False)
 
     async def handle_callback_query(self, event):
-    """Обработчик нажатий на inline кнопки - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
+        """Обработчик нажатий на inline кнопки - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
         if not event.is_private:
             await event.answer()  # Просто отвечаем, но ничего не делаем
             return
 
         if not await self.check_access(event):
             return
-
-    
 
         data = event.data.decode('utf-8') if event.data else ''
 
@@ -508,31 +512,31 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
             return
 
         admin_text = f"""
-    👑 **Админ панель**
+👑 **Админ панель**
 
-    **Статистика пользователей:**
-    • Админы: {len(ADMINS)}
-    • Белый список: {len(WHITELIST)}
-    • Активных сделок: {len(self.active_signals)}
+**Статистика пользователей:**
+• Админы: {len(ADMINS)}
+• Белый список: {len(WHITELIST)}
+• Активных сделок: {len(self.active_signals)}
 
-    **👥 Управление пользователями:**
-    `/adduser <user_id>` - Добавить пользователя
-    `/removeuser <user_id>` - Удалить пользователя  
-    `/listusers` - Список пользователей
+**👥 Управление пользователями:**
+`/adduser <user_id>` - Добавить пользователя
+`/removeuser <user_id>` - Удалить пользователя  
+`/listusers` - Список пользователей
 
-    **📊 Управление сделками:**
-    `/editsignal <signal_id> <param> <value>` - Редактировать сделку
-    `/addsignal` - Добавить сделку вручную
-    `/activesignals` - Список сделок с ID
+**📊 Управление сделками:**
+`/editsignal <signal_id> <param> <value>` - Редактировать сделку
+`/addsignal` - Добавить сделку вручную
+`/activesignals` - Список сделок с ID
 
-    **🛠 Другие команды:**
-    `/adminhelp` - Подробная справка по командам
+**🛠 Другие команды:**
+`/adminhelp` - Подробная справка по командам
 
-    **📝 Примеры:**
-    `/adduser 123456789`
-    `/editsignal BTCUSDT_123456 stop_loss 50000`
-    `/editsignal BTCUSDT_123456 take_profits [51000,52000,53000]`
-    `/addsignal` - и следуйте инструкциям
+**📝 Примеры:**
+`/adduser 123456789`
+`/editsignal BTCUSDT_123456 stop_loss 50000`
+`/editsignal BTCUSDT_123456 take_profits [51000,52000,53000]`
+`/addsignal` - и следуйте инструкциям
         """
 
         await event.reply(admin_text)
@@ -664,39 +668,39 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
             return
 
         help_text = """
-    👑 **АДМИН КОМАНДЫ - Полный список**
+👑 **АДМИН КОМАНДЫ - Полный список**
 
-    👥 **Управление пользователями:**
-    `/adduser <user_id>` - Добавить пользователя в белый список
-    `/removeuser <user_id>` - Удалить пользователя из белого списка  
-    `/listusers` - Показать всех пользователей
+👥 **Управление пользователями:**
+`/adduser <user_id>` - Добавить пользователя в белый список
+`/removeuser <user_id>` - Удалить пользователя из белого списка  
+`/listusers` - Показать всех пользователей
 
-    📊 **Управление сделками:**
-    `/editsignal <signal_id> <param> <value>` - Редактировать сделку
-    `/addsignal` - Вручную добавить новую сделку
-    `/activesignals` - Список активных сделок с ID
+📊 **Управление сделками:**
+`/editsignal <signal_id> <param> <value>` - Редактировать сделку
+`/addsignal` - Вручную добавить новую сделку
+`/activesignals` - Список активных сделок с ID
 
-    🛠 **Другие команды:**
-    `/admin` - Панель управления
-    `/adminhelp` - Эта справка
+🛠 **Другие команды:**
+`/admin` - Панель управления
+`/adminhelp` - Эта справка
 
-    📝 **ПРИМЕРЫ ИСПОЛЬЗОВАНИЯ:**
+📝 **ПРИМЕРЫ ИСПОЛЬЗОВАНИЯ:**
 
-    **Добавление пользователя:**
-    `/adduser 123456789` - добавить пользователя с ID 123456789
+**Добавление пользователя:**
+`/adduser 123456789` - добавить пользователя с ID 123456789
 
-    **Редактирование сделки:**
-    `/editsignal BTCUSDT_1700000000 stop_loss 50000`
-    `/editsignal BTCUSDT_1700000000 take_profits [51000,52000,53000]`
-    `/editsignal BTCUSDT_1700000000 entry_prices [50000,49500]`
+**Редактирование сделки:**
+`/editsignal BTCUSDT_1700000000 stop_loss 50000`
+`/editsignal BTCUSDT_1700000000 take_profits [51000,52000,53000]`
+`/editsignal BTCUSDT_1700000000 entry_prices [50000,49500]`
 
-    **Добавление сделки вручную:**
-    Отправьте `/addsignal` и следуйте инструкциям
+**Добавление сделки вручную:**
+Отправьте `/addsignal` и следуйте инструкциям
 
-    🔍 **Где найти signal_id?**
-    - В веб-интерфейсе в столбце "ID сигнала"
-    - В команде `/activesignals`
-    - В логах бота при парсинге сигнала
+🔍 **Где найти signal_id?**
+- В веб-интерфейсе в столбце "ID сигнала"
+- В команде `/activesignals`
+- В логах бота при парсинге сигнала
         """
 
         await event.reply(help_text)
@@ -709,41 +713,37 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
             await event.reply("❌ Эта команда только для администраторов")
             return
 
-        # Проверяем, находится ли пользователь в процессе добавления сделки
-        if hasattr(event, 'add_signal_state') and event.add_signal_state:
-            await self.process_add_signal_steps(event)
-            return
+        # Создаем атрибут состояния для пользователя, если его нет
+        if not hasattr(event, '_client') or not hasattr(event, 'add_signal_state'):
+            event.add_signal_state = True
 
-        # Начинаем процесс добавления сделки
         instruction_text = """
-    📝 **ДОБАВЛЕНИЕ СДЕЛКИ ВРУЧНУЮ**
+📝 **ДОБАВЛЕНИЕ СДЕЛКИ ВРУЧНУЮ**
 
-    Отправьте данные сделки в формате:
+Отправьте данные сделки в формате:
 
-    **СИМВОЛ НАПРАВЛЕНИЕ ЦЕНА_ВХОДА СТОП_ЛОСС ТЕЙК_ПРОФИТЫ [ПЛЕЧО] [МАРЖА] [ИСТОЧНИК]**
+**СИМВОЛ НАПРАВЛЕНИЕ ЦЕНА_ВХОДА СТОП_ЛОСС ТЕЙК_ПРОФИТЫ [ПЛЕЧО] [МАРЖА] [ИСТОЧНИК]**
 
-    **Примеры:**
-    `BTCUSDT LONG 50000 49000 51000,52000,53000`
-    `ETHUSDT SHORT 3500 3600 3400,3300,3200 10 1000 Manual`
-    `SOLUSDT LONG 150 140 160,170,180 5 500 My_Analysis`
+**Примеры:**
+`BTCUSDT LONG 50000 49000 51000,52000,53000`
+`ETHUSDT SHORT 3500 3600 3400,3300,3200 10 1000 Manual`
+`SOLUSDT LONG 150 140 160,170,180 5 500 My_Analysis`
 
-    **Обязательные поля:**
-    - Символ (BTCUSDT, ETHUSDT и т.д.)
-    - Направление (LONG/SHORT) 
-    - Цена входа (число)
-    - Стоп-лосс (число)
-    - Тейк-профиты (через запятую)
+**Обязательные поля:**
+- Символ (BTCUSDT, ETHUSDT и т.д.)
+- Направление (LONG/SHORT) 
+- Цена входа (число)
+- Стоп-лосс (число)
+- Тейк-профиты (через запятую)
 
-    **Опциональные:**
-    - Плечо (по умолчанию: 1)
-    - Маржа (по умолчанию: 0) 
-    - Источник (по умолчанию: "Manual")
+**Опциональные:**
+- Плечо (по умолчанию: 1)
+- Маржа (по умолчанию: 0) 
+- Источник (по умолчанию: "Manual")
 
-    Отправьте данные сейчас:
+Отправьте данные сейчас:
         """
 
-        # Устанавливаем состояние ожидания данных
-        event.add_signal_state = True
         await event.reply(instruction_text)
 
     async def process_add_signal_steps(self, event):
@@ -776,7 +776,7 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
                 source = ' '.join(parts[7:])
 
             # Создаем сигнал
-            signal = advanced_parser.TradingSignal()
+            signal = advanced_parser.TradeSignal()
             signal.symbol = symbol
             signal.direction = direction
             signal.entry_prices = [entry_price]
@@ -808,25 +808,22 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
 
             # Отправляем подтверждение
             success_text = f"""
-    ✅ **СДЕЛКА ДОБАВЛЕНА**
+✅ **СДЕЛКА ДОБАВЛЕНА**
 
-    **ID сделки:** `{signal_id}`
-    **Символ:** {signal.symbol}
-    **Направление:** {signal.direction}
-    **Цена входа:** {entry_price}
-    **Стоп-лосс:** {stop_loss}
-    **Тейк-профиты:** {', '.join(map(str, take_profits))}
-    **Плечо:** {leverage}
-    **Маржа:** {margin}
-    **Источник:** {source}
+**ID сделки:** `{signal_id}`
+**Символ:** {signal.symbol}
+**Направление:** {signal.direction}
+**Цена входа:** {entry_price}
+**Стоп-лосс:** {stop_loss}
+**Тейк-профиты:** {', '.join(map(str, take_profits))}
+**Плечо:** {leverage}
+**Маржа:** {margin}
+**Источник:** {source}
 
-    Сделка теперь отслеживается в реальном времени!
+Сделка теперь отслеживается в реальном времени!
             """
 
             await event.reply(success_text)
-
-            # Сбрасываем состояние
-            event.add_signal_state = False
 
         except ValueError as e:
             await event.reply(f"❌ Ошибка формата чисел: {e}\nПроверьте, что все числовые значения введены правильно.")
@@ -869,6 +866,7 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
         active_text += "`/editsignal <ID> <параметр> <значение>`"
 
         await event.reply(active_text)
+
     async def update_signal_in_web_interface(self, signal_id):
         """Обновляет данные сигнала в веб-интерфейсе"""
         if signal_id not in self.active_signals:
@@ -914,13 +912,12 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
             trading_data.update_signal_data(signal_data)
 
     async def handle_dashboard_command(self, event):
-    """Обработчик команды /dashboard - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
+        """Обработчик команды /dashboard - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
         if not event.is_private:
             return
         
         if not await self.check_access(event):
             return
-        
 
         button = self.create_web_app_button("🚀 Открыть Trading Dashboard", WEB_APP_URL)
         await event.reply(
@@ -930,13 +927,12 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
         )
 
     async def handle_stats_command(self, event):
-    """Обработчик команды /stats - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
+        """Обработчик команды /stats - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
         if not event.is_private:
             return
         
         if not await self.check_access(event):
             return
-
 
         active_signals_count = len(self.active_signals)
 
@@ -974,13 +970,12 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
         await event.reply(stats_text, buttons=button)
 
     async def handle_active_command(self, event):
-    """Обработчик команды /active - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
+        """Обработчик команды /active - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
         if not event.is_private:
             return
         
         if not await self.check_access(event):
             return
-
 
         if not self.active_signals:
             await event.reply("🔄 **Активные сделки**\n\nНет активных сделок")
@@ -1014,6 +1009,11 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
         if not await self.check_access(event):
             return
 
+        # Проверяем, находится ли пользователь в процессе добавления сделки
+        if hasattr(event, 'add_signal_state') and event.add_signal_state:
+            await self.process_add_signal_steps(event)
+            return
+
         if event.raw_text == "📊 Dashboard":
             await self.handle_dashboard_command(event)
         elif event.raw_text == "📈 Статистика":
@@ -1026,7 +1026,7 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
             await self.handle_admin_command(event)
 
     async def handle_help_command(self, event):
-    """Обработчик команды помощи - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
+        """Обработчик команды помощи - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
         if not event.is_private:
             return
         
@@ -1034,13 +1034,13 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
             return
 
         help_text = """
-    ❓ **Помощь по Trading Bot**
+❓ **Помощь по Trading Bot**
 
-    **Основные команды:**
-    /start - Главное меню
-    /dashboard - Открыть веб-интерфейс  
-    /stats - Статистика сделок
-    /active - Активные сделки
+**Основные команды:**
+/start - Главное меню
+/dashboard - Открыть веб-интерфейс  
+/stats - Статистика сделок
+/active - Активные сделки
         """
 
         # Добавляем админские команды если пользователь админ
@@ -1056,82 +1056,6 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
             help_text += "/activesignals - Список сделок с ID\n"
 
         await event.reply(help_text)
-
-    async def handle_channel_message(self, event):
-        """Обрабатывает сообщения из каналов"""
-        try:
-            message_text = event.message.text
-            chat_id = event.chat_id
-
-            # Определяем источник по ID канала
-            from config_telethon import get_channel_source
-            channel_name = get_channel_source(chat_id)
-
-            if not message_text:
-                return
-
-            logger.info(f"📨 Сообщение из '{channel_name}': {message_text[:100]}...")
-
-            # Парсим сигнал
-            signal = advanced_parser.parse_signal(message_text, channel_name)
-
-            # Если символ не распознан, пропускаем
-            if signal.symbol == "UNKNOWN":
-                logger.warning(f"⚠️  Символ не распознан, пропускаем сообщение")
-                return
-
-            # Для рыночных входов получаем текущую цену
-            if not signal.entry_prices and not signal.limit_prices:
-                current_price, exchange_used = await multi_exchange.get_current_price(signal.symbol)
-                if current_price:
-                    signal.entry_prices = [current_price]
-                    logger.info(
-                        f"💰 Рыночный вход - текущая цена {signal.symbol}: {current_price} (биржa: {exchange_used})")
-                else:
-                    logger.warning(f"⚠️  Не удалось получить цену для {signal.symbol}")
-
-            # Сохраняем сигнал в активные
-            signal_id = f"{signal.symbol}_{int(signal.timestamp)}"
-            self.active_signals[signal_id] = signal
-
-            # 🔥 ДОБАВИТЬ: Сохраняем сигнал в trading_data для веб-интерфейса
-            signal_data = {
-                'signal_id': signal_id,
-                'symbol': signal.symbol,
-                'direction': signal.direction,
-                'entry_prices': signal.entry_prices,
-                'limit_prices': signal.limit_prices,
-                'take_profits': signal.take_profits,
-                'stop_loss': signal.stop_loss,
-                'leverage': signal.leverage,
-                'margin': signal.margin,
-                'source': signal.source,
-                'pnl_percent': 0,  # Начальный PnL
-                'reached_tps': [],
-                'exchange': 'Unknown',
-                'timestamp': signal.timestamp
-            }
-            trading_data.update_signal_data(signal_data)
-            logger.info(f"💾 Сигнал сохранен в trading_data: {signal.symbol}")
-
-            # Логируем успешный парсинг
-            logger.info(f"✅ СИГНАЛ РАСПОЗНАН:")
-            logger.info(f"   Символ: {signal.symbol}")
-            logger.info(f"   Направление: {signal.direction}")
-            logger.info(f"   Входы: {signal.entry_prices}")
-            logger.info(f"   Лимитные входы: {signal.limit_prices}")
-            logger.info(f"   Тейки: {signal.take_profits}")
-            logger.info(f"   Стоп: {signal.stop_loss}")
-            logger.info(f"   Плечо: {signal.leverage}")
-            logger.info(f"   Маржа: {signal.margin}")
-            logger.info(f"   Источник: {signal.source}")
-            logger.info("-" * 60)
-
-            # Запускаем мониторинг цены для этого сигнала
-            asyncio.create_task(self.monitor_signal(signal_id))
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки сообщения: {e}")
 
     async def monitor_signal(self, signal_id: str):
         """Мониторит цену для сигнала в реальном времени"""
@@ -1216,16 +1140,9 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
                 logger.info(f"{status} {signal.symbol}: {pnl_percent:+.2f}% | Цена: {current_price}")
 
                 # Проверяем завершение сделки
-                # В методе monitor_signal замените блоки завершения сделок:
-
-                # Проверяем завершение сделки
                 if len(reached_tps) == len(signal.take_profits) and signal.take_profits:
                     logger.info(f"✅ ВСЕ ТЕЙК-ПРОФИТЫ ДОСТИГНУТЫ для {signal.symbol}")
                     await self.save_to_history(signal_id, "all_take_profits", current_price)
-
-                    # УДАЛЯЕМ ИЗ TRADING_DATA
-                    if signal_id in trading_data.active_signals:
-                        del trading_data.active_signals[signal_id]
                     del self.active_signals[signal_id]
                     break
 
@@ -1234,10 +1151,6 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
                             (signal.direction == "SHORT" and current_price >= signal.stop_loss):
                         logger.info(f"🛑 ДОСТИГНУТ СТОП-ЛОСС для {signal.symbol}: {signal.stop_loss}")
                         await self.save_to_history(signal_id, "stop_loss", current_price)
-
-                        # УДАЛЯЕМ ИЗ TRADING_DATA
-                        if signal_id in trading_data.active_signals:
-                            del trading_data.active_signals[signal_id]
                         del self.active_signals[signal_id]
                         break
 
@@ -1272,10 +1185,6 @@ def has_concrete_trading_data(self, message_text: str) -> bool:
 
         # Сохраняем в глобальные данные
         trading_data.add_to_history(history_entry)
-
-        # УДАЛЯЕМ ИЗ АКТИВНЫХ В TRADING_DATA
-        if signal_id in trading_data.active_signals:
-            del trading_data.active_signals[signal_id]
 
         logger.info(f"📝 Сделка {signal.symbol} добавлена в историю с причиной: {close_reason}")
 

@@ -1,5 +1,4 @@
 from telethon import TelegramClient, events, Button
-from proxy_settings import MT_PROXIES
 import random
 from parser.advanced_parser import advanced_parser
 from exchanges.multi_exchange import multi_exchange
@@ -28,6 +27,7 @@ try:
 except ImportError:
     HAS_WEB_APP_SUPPORT = False
     logger.warning("⚠️  InputWebAppInfo не доступен, используем fallback")
+
 
     class InputWebAppInfo:
         def __init__(self, url):
@@ -127,7 +127,8 @@ class TelethonTradingBot:
                 current_price, exchange_used = await multi_exchange.get_current_price(signal.symbol)
                 if current_price:
                     signal.entry_prices = [current_price]
-                    logger.info(f"💰 Рыночный вход - текущая цена {signal.symbol}: {current_price} (биржa: {exchange_used})")
+                    logger.info(
+                        f"💰 Рыночный вход - текущая цена {signal.symbol}: {current_price} (биржa: {exchange_used})")
                 else:
                     logger.warning(f"⚠️  Не удалось получить цену для {signal.symbol}")
                     return
@@ -177,26 +178,26 @@ class TelethonTradingBot:
 
     def is_valid_trading_signal(self, signal, message_text: str) -> bool:
         """Проверяет, является ли сообщение полноценным торговым сигналом"""
-        
+
         # Минимальные требования для торгового сигнала:
         # 1. Должны быть указаны цены входа (entry_prices или limit_prices)
         has_entry_prices = bool(signal.entry_prices or signal.limit_prices)
-        
+
         # 2. Должны быть указаны тейк-профиты ИЛИ стоп-лосс
         has_trading_levels = bool(signal.take_profits or signal.stop_loss)
-        
+
         # 3. Проверяем, что в сообщении есть конкретные числовые данные
         has_concrete_data = self.has_concrete_trading_data(message_text)
-        
+
         # Сигнал валиден, если есть все необходимое
         is_valid = has_entry_prices and has_trading_levels and has_concrete_data
-        
+
         if not is_valid:
             logger.info(f"🔍 Проверка сигнала {signal.symbol}: "
-                       f"entry_prices={has_entry_prices}, "
-                       f"trading_levels={has_trading_levels}, "
-                       f"concrete_data={has_concrete_data}")
-        
+                        f"entry_prices={has_entry_prices}, "
+                        f"trading_levels={has_trading_levels}, "
+                        f"concrete_data={has_concrete_data}")
+
         return is_valid
 
     def has_concrete_trading_data(self, message_text: str) -> bool:
@@ -206,25 +207,25 @@ class TelethonTradingBot:
             r'\d+[.,]\d+\s*\$',  # Цены с долларом: 0.48$, 3$
             r'[TТ][PП]\d*\s*:?\s*\d+[.,]\d+',  # TP1: 0.48, ТП2: 0.58
             r'тейк\s*профит',  # Упоминание тейк-профитов
-            r'стоп\s*лосс',    # Упоминание стоп-лосса
+            r'стоп\s*лосс',  # Упоминание стоп-лосса
             r'вход\s*:?\s*\d+[.,]\d+',  # Вход: 0.9
             r'добор\s*\d+[.,]\d+',  # Добор 0.78
             r'лимитный\s*ордер',  # Лимитный ордер
             r'маржа\s*\d+',  # Маржа 0.3%
             r'фикс\s*\d+%',  # Фикс 20% объема
         ]
-        
+
         clean_text = message_text.lower().replace(' ', '')
-        
+
         for pattern in concrete_patterns:
             if re.search(pattern, message_text, re.IGNORECASE):
                 return True
-        
+
         # Дополнительная проверка: должно быть достаточно чисел для торговли
         numbers = re.findall(r'\d+[.,]\d+', message_text)
         if len(numbers) >= 3:  # Если есть хотя бы 3 числа (вход + тейки/стоп)
             return True
-        
+
         return False
 
     async def handle_khrustalev_message(self, text: str, source: str, event):
@@ -425,7 +426,7 @@ class TelethonTradingBot:
         # Проверяем, что это личное сообщение
         if not event.is_private:
             return
-        
+
         if not await self.check_access(event):
             return
 
@@ -915,7 +916,7 @@ class TelethonTradingBot:
         """Обработчик команды /dashboard - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
         if not event.is_private:
             return
-        
+
         if not await self.check_access(event):
             return
 
@@ -930,7 +931,7 @@ class TelethonTradingBot:
         """Обработчик команды /stats - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
         if not event.is_private:
             return
-        
+
         if not await self.check_access(event):
             return
 
@@ -973,7 +974,7 @@ class TelethonTradingBot:
         """Обработчик команды /active - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
         if not event.is_private:
             return
-        
+
         if not await self.check_access(event):
             return
 
@@ -1029,7 +1030,7 @@ class TelethonTradingBot:
         """Обработчик команды помощи - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
         if not event.is_private:
             return
-        
+
         if not await self.check_access(event):
             return
 

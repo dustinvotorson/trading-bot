@@ -35,44 +35,46 @@ class AdvancedSignalParser:
             'ARTEMA': ['артема'],
             'KHRUSTALEV': ['хрусталев', 'khrustalev']
         }
+
     def is_preliminary_announcement(self, text: str) -> bool:
-    """Определяет, является ли сообщение предварительным объявлением"""
-    text_lower = text.lower()
-    
-    # Паттерны, указывающие на предварительное объявление
-    preliminary_patterns = [
-        r'готовься',
-        r'приготовь',
-        r'скоро',
-        r'будет',
-        r'следи',
-        r'внимание',
-        r'объявляю',
-        r'анонс',
-        r'предупреждение',
-        r'жду',
-        r'ожидай',
-        r'следующ',
-    ]
-    
-    # Если есть эти слова и мало конкретных данных
-    has_preliminary_keywords = any(re.search(pattern, text_lower) for pattern in preliminary_patterns)
-    
-    # Считаем количество конкретных торговых данных
-    trading_data_patterns = [
-        r'\d+[.,]\d+\s*\$',
-        r'[TТ][PП]\d*\s*:?\s*\d+[.,]\d+',
-        r'стоп\s*лосс\s*\d+[.,]\d+',
-        r'вход\s*:?\s*\d+[.,]\d+',
-    ]
-    
-    concrete_data_count = sum(1 for pattern in trading_data_patterns if re.search(pattern, text, re.IGNORECASE))
-    
-    # Если есть ключевые слова предварительного объявления и мало конкретных данных
-    if has_preliminary_keywords and concrete_data_count < 2:
-        return True
-        
-    return False
+        """Определяет, является ли сообщение предварительным объявлением"""
+        text_lower = text.lower()
+
+        # Паттерны, указывающие на предварительное объявление
+        preliminary_patterns = [
+            r'готовься',
+            r'приготовь',
+            r'скоро',
+            r'будет',
+            r'следи',
+            r'внимание',
+            r'объявляю',
+            r'анонс',
+            r'предупреждение',
+            r'жду',
+            r'ожидай',
+            r'следующ',
+        ]
+
+        # Если есть эти слова и мало конкретных данных
+        has_preliminary_keywords = any(re.search(pattern, text_lower) for pattern in preliminary_patterns)
+
+        # Считаем количество конкретных торговых данных
+        trading_data_patterns = [
+            r'\d+[.,]\d+\s*\$',
+            r'[TТ][PП]\d*\s*:?\s*\d+[.,]\d+',
+            r'стоп\s*лосс\s*\d+[.,]\d+',
+            r'вход\s*:?\s*\d+[.,]\d+',
+        ]
+
+        concrete_data_count = sum(1 for pattern in trading_data_patterns if re.search(pattern, text, re.IGNORECASE))
+
+        # Если есть ключевые слова предварительного объявления и мало конкретных данных
+        if has_preliminary_keywords and concrete_data_count < 2:
+            return True
+
+        return False
+
     def extract_all_numbers(self, text: str) -> List[float]:
         """Извлекает все числа из текста"""
         numbers = []
@@ -92,7 +94,7 @@ class AdvancedSignalParser:
         return symbol
 
     def parse_cryptograd(self, text: str) -> Tuple[List[float], List[float], Optional[float]]:
-        """Парсинг CryptoGrad - УЛУЧШЕННАЯ ВЕРСИЯ"""
+        """Парсинг CryptoGrad - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         logger.info("🔧 Parsing CryptoGrad format")
 
         entry_prices = []
@@ -100,6 +102,9 @@ class AdvancedSignalParser:
         stop_loss = None
 
         lines = text.split('\n')
+
+        # Флаг для отслеживания секции тейк-профитов
+        in_take_profits_section = False
 
         for line in lines:
             line_clean = line.strip()
@@ -111,19 +116,44 @@ class AdvancedSignalParser:
                     entry_prices = [float(prices[0])]
                     logger.info(f"🔧 Found CryptoGrad entry: {entry_prices}")
 
-            # Поиск тейк-профитов
-            elif any(keyword in line_clean.lower() for keyword in ['цели', 'тейк', 'take profit', 'tp']):
+            # Поиск тейк-профитов - ТОЛЬКО в секции целей
+            elif any(
+                    keyword in line_clean.lower() for keyword in ['ориентировочные цели', 'цели', 'take profit', 'tp']):
+                in_take_profits_section = True
                 prices = re.findall(r'(\d+[.,]\d+)', line_clean.replace(',', '.'))
                 if prices:
-                    take_profits.extend([float(p) for p in prices])
-                    logger.info(f"🔧 Found CryptoGrad TPs: {take_profits}")
+                    # Для LONG сделки фильтруем только тейки ВЫШЕ цены входа
+                    if entry_prices:
+                        filtered_prices = [float(p) for p in prices if float(p) > entry_prices[0]]
+                        take_profits.extend(filtered_prices)
+                        logger.info(f"🔧 Found CryptoGrad TPs (filtered): {filtered_prices}")
+                    else:
+                        take_profits.extend([float(p) for p in prices])
+                        logger.info(f"🔧 Found CryptoGrad TPs: {take_profits}")
 
             # Поиск стоп-лосса
             elif any(keyword in line_clean.lower() for keyword in ['стоп', 'stop loss', 'sl']):
+                in_take_profits_section = False
                 prices = re.findall(r'(\d+[.,]\d+)', line_clean.replace(',', '.'))
                 if prices:
                     stop_loss = float(prices[0])
                     logger.info(f"🔧 Found CryptoGrad SL: {stop_loss}")
+
+            # Если мы в секции тейк-профитов, продолжаем собирать (для многострочных целей)
+            elif in_take_profits_section:
+                # Проверяем, не началась ли следующая секция
+                if any(keyword in line_clean.lower() for keyword in ['стоп', 'маржа', 'margin', 'кросс']):
+                    in_take_profits_section = False
+                else:
+                    # Продолжаем собирать тейк-профиты
+                    prices = re.findall(r'(\d+[.,]\d+)', line_clean.replace(',', '.'))
+                    if prices and entry_prices:
+                        filtered_prices = [float(p) for p in prices if float(p) > entry_prices[0]]
+                        take_profits.extend(filtered_prices)
+                        logger.info(f"🔧 Found additional CryptoGrad TPs: {filtered_prices}")
+
+        # Убираем дубликаты и сортируем
+        take_profits = sorted(list(set(take_profits)))
 
         return entry_prices, take_profits, stop_loss
 
@@ -183,6 +213,7 @@ class AdvancedSignalParser:
                         pass
 
         return entry_prices, take_profits, stop_loss
+
     def parse_private_club(self, text: str) -> Tuple[List[float], List[float], Optional[float]]:
         """Парсинг Private Club - УЛУЧШЕННАЯ ВЕРСИЯ"""
         logger.info("🔧 Parsing Private Club format")
@@ -333,7 +364,7 @@ class AdvancedSignalParser:
             # Убираем текст в скобках (проценты объема)
             line_without_brackets = re.sub(r'\([^)]*\)', '', line)
 
-            # Ищем TP в разных форматах
+            # Ищем TP в разных формаats
             tp_patterns = [
                 r'TP\s*\d*\s*:?\s*(\d+[.,]?\d*)\s*\$?',  # TP1: 3$ или TP1: 3.0
                 r'(\d+[.,]?\d*)\s*\$',  # 3$ или 3.0$
@@ -463,6 +494,7 @@ class AdvancedSignalParser:
                         pass
 
         return entry_prices, take_profits, stop_loss
+
     def parse_khrustalev(self, text: str, source: str) -> TradeSignal:
         """Парсинг сигналов Хрусталева - УЛУЧШЕННАЯ ВЕРСИЯ"""
         logger.info("🔧 Parsing Khrustalev format")
@@ -574,6 +606,7 @@ class AdvancedSignalParser:
             source=source,
             timestamp=time.time()
         )
+
     def extract_leverage(self, text: str) -> Optional[int]:
         """Извлекает плечо - УЛУЧШЕННАЯ ВЕРСИЯ"""
         patterns = [
@@ -727,32 +760,34 @@ class AdvancedSignalParser:
             return channel_source
 
     def parse_signal(self, text: str, source: str) -> TradeSignal:
-    """Основной метод парсинга - с проверкой на предварительные объявления"""
-    logger.info(f"🔍 Parsing signal from: {source}")
-    
-    # Проверяем, не является ли это предварительным объявлением
-    if self.is_preliminary_announcement(text):
-        logger.info("🔕 Обнаружено предварительное объявление, пропускаем")
-        return TradeSignal(
-            symbol="UNKNOWN",
-            direction="UNKNOWN",
-            entry_prices=[],
-            limit_prices=[],
-            take_profits=[],
-            stop_loss=None,
-            leverage=None,
-            margin=None,
-            source=source,
-            timestamp=time.time()
-        )
-    
-    # Остальной код парсинга без изменений...
-    logger.info(f"🔍 Text preview: {text[:200]}...")
-    
-    detected_source = self.detect_source(text, source)
-    logger.info(f"🔍 Detected source: {detected_source}")
-    
-    
+        """Основной метод парсинга - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+        logger.info(f"🔍 Parsing signal from: {source}")
+        logger.info(f"🔍 Text preview: {text[:200]}...")
+
+        # Определяем источник
+        detected_source = self.detect_source(text, source)
+        logger.info(f"🔍 Detected source: {detected_source}")
+
+        # Извлекаем символ
+        symbol = self.extract_symbol_improved(text)
+        logger.info(f"🔍 Symbol: {symbol}")
+
+        # Направление
+        direction = self.extract_direction(text)
+        logger.info(f"🔍 Direction: {direction}")
+
+        # Плечо
+        leverage = self.extract_leverage(text)
+        logger.info(f"🔍 Leverage: {leverage}")
+
+        # Маржа
+        margin = self.extract_margin(text)
+
+        # Парсим в зависимости от источника
+        entry_prices = []
+        limit_prices = []
+        take_profits = []
+        stop_loss = None
 
         if detected_source == "WOLF_TRADING":
             entry_prices, limit_prices, take_profits, stop_loss = self.parse_wolf_trading(text)
@@ -764,15 +799,20 @@ class AdvancedSignalParser:
             entry_prices, take_profits, stop_loss = self.parse_private_club(text)
         elif detected_source == "CRYPTOGRAD":
             entry_prices, take_profits, stop_loss = self.parse_cryptograd(text)
-        elif detected_source == "CRYPTOFUTURES":
-            entry_prices, take_profits, stop_loss = self.parse_cryptofutures(text)
         else:
             # Универсальный парсер для неизвестных форматов
             all_prices = self.extract_all_numbers(text)
             if all_prices:
                 if len(all_prices) >= 3:
                     entry_prices = [all_prices[0]]
-                    take_profits = all_prices[1:-1]
+                    # ФИЛЬТРУЕМ тейк-профиты по направлению
+                    potential_tps = all_prices[1:-1]
+                    if direction == "LONG":
+                        take_profits = [tp for tp in potential_tps if tp > entry_prices[0]]
+                    elif direction == "SHORT":
+                        take_profits = [tp for tp in potential_tps if tp < entry_prices[0]]
+                    else:
+                        take_profits = potential_tps
                     stop_loss = all_prices[-1]
                 elif len(all_prices) == 2:
                     entry_prices = [all_prices[0]]
@@ -789,6 +829,24 @@ class AdvancedSignalParser:
                 if len(all_numbers) > 1:
                     take_profits = all_numbers[1:]
                 logger.info(f"🔍 Fallback parser found: Entries: {entry_prices}, TPs: {take_profits}")
+
+        # 🔥 ВАЖНОЕ ИСПРАВЛЕНИЕ: Фильтруем тейк-профиты по направлению
+        if entry_prices and take_profits:
+            entry_price = entry_prices[0]
+            if direction == "LONG":
+                # Для LONG: тейк-профиты должны быть ВЫШЕ цены входа
+                filtered_tps = [tp for tp in take_profits if tp > entry_price]
+                if len(filtered_tps) != len(take_profits):
+                    logger.info(
+                        f"🔍 Filtered TPs for LONG: removed {len(take_profits) - len(filtered_tps)} TPs below entry")
+                    take_profits = filtered_tps
+            elif direction == "SHORT":
+                # Для SHORT: тейк-профиты должны быть НИЖЕ цены входа
+                filtered_tps = [tp for tp in take_profits if tp < entry_price]
+                if len(filtered_tps) != len(take_profits):
+                    logger.info(
+                        f"🔍 Filtered TPs for SHORT: removed {len(take_profits) - len(filtered_tps)} TPs above entry")
+                    take_profits = filtered_tps
 
         logger.info(f"🔍 Final result - Symbol: {symbol}, Direction: {direction}, " +
                     f"Entries: {entry_prices}, Limits: {limit_prices}, TPs: {take_profits}, SL: {stop_loss}")

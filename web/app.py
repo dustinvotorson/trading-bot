@@ -85,6 +85,7 @@ class TradingData:
         """Возвращает обработанные данные с ПРАВИЛЬНЫМИ reached_tps"""
         processed_signals = {}
 
+        # ВАЖНО: Используем self.active_signals.items() а не trading_data.active_signals
         for signal_id, signal in self.active_signals.items():
             # Создаем глубокую копию сигнала
             processed_signal = signal.copy()
@@ -121,6 +122,8 @@ class TradingData:
             processed_signals[signal_id] = processed_signal
 
         print(f"📊 Всего активных сигналов: {len(processed_signals)}")
+
+        # ВОЗВРАЩАЕМ ВСЕ сигналы, без ограничений
         return {
             'active_signals': processed_signals,
             'price_updates': self.price_updates,

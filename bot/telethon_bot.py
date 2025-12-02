@@ -177,28 +177,38 @@ class TelethonTradingBot:
             logger.error(f"❌ Ошибка обработки сообщения: {e}")
 
     def is_valid_trading_signal(self, signal, message_text: str) -> bool:
-        """Проверяет, является ли сообщение полноценным торговым сигналом"""
+        """Проверяет, является ли сообщение полноценным торговым сигналом - УЛУЧШЕННАЯ ВЕРСИЯ"""
 
-        # Минимальные требования для торгового сигнала:
-        # 1. Должны быть указаны цены входа (entry_prices или limit_prices)
-        has_entry_prices = bool(signal.entry_prices or signal.limit_prices)
+        # 1. Символ не должен быть UNKNOWN
+        if signal.symbol == "UNKNOWN":
+            logger.info(f"🔕 Пропускаем - символ не распознан")
+            return False
 
-        # 2. Должны быть указаны тейк-профиты ИЛИ стоп-лосс
-        has_trading_levels = bool(signal.take_profits or signal.stop_loss)
+        # 2. Направление должно быть определено (LONG/SHORT)
+        if signal.direction == "UNKNOWN":
+            logger.info(f"🔕 Пропускаем - направление не распознано")
+            return False
 
-        # 3. Проверяем, что в сообщении есть конкретные числовые данные
+        # 3. Должны быть указаны цены входа
+        has_entry_prices = bool(signal.entry_prices)
+        if not has_entry_prices:
+            logger.info(f"🔕 Пропускаем - нет цен входа")
+            return False
+
+        # 4. Должны быть указаны тейк-профиты
+        has_take_profits = bool(signal.take_profits)
+        if not has_take_profits:
+            logger.info(f"🔕 Пропускаем - нет тейк-профитов")
+            return False
+
+        # 5. Проверяем конкретные данные в сообщении
         has_concrete_data = self.has_concrete_trading_data(message_text)
+        if not has_concrete_data:
+            logger.info(f"🔕 Пропускаем - нет конкретных торговых данных")
+            return False
 
-        # Сигнал валиден, если есть все необходимое
-        is_valid = has_entry_prices and has_trading_levels and has_concrete_data
-
-        if not is_valid:
-            logger.info(f"🔍 Проверка сигнала {signal.symbol}: "
-                        f"entry_prices={has_entry_prices}, "
-                        f"trading_levels={has_trading_levels}, "
-                        f"concrete_data={has_concrete_data}")
-
-        return is_valid
+        logger.info(f"✅ Сигнал {signal.symbol} прошел все проверки")
+        return True
 
     def has_concrete_trading_data(self, message_text: str) -> bool:
         """Проверяет, содержит ли сообщение конкретные торговые данные"""

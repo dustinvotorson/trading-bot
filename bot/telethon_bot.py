@@ -11,7 +11,27 @@ import time
 import os
 import re
 from config_telethon import get_channel_source
+import sys
+import asyncio
+from telethon.errors import TypeNotFoundError
 
+
+# Обработчик для перехвата ошибок Telethon
+def handle_telethon_error():
+    """Обработчик для игнорирования ошибок TypeNotFoundError"""
+    loop = asyncio.get_event_loop()
+
+    def exception_handler(loop, context):
+        exception = context.get('exception')
+        if isinstance(exception, TypeNotFoundError):
+            logger.error(f"⚠️  Telethon TypeNotFoundError: {exception}")
+            logger.info("🔄 Игнорируем ошибку и продолжаем работу...")
+            return  # Игнорируем ошибку
+
+        # Для других ошибок - стандартная обработка
+        loop.default_exception_handler(context)
+
+    loop.set_exception_handler(exception_handler)
 # MONITORED_CHANNELS = [-1002972873621]
 logger = logging.getLogger(__name__)
 
@@ -42,6 +62,7 @@ class TelethonTradingBot:
         - прокси берём из proxy_settings.MT_PROXIES (random.choice). Если прокси нет — используем None (прямое подключение).
         - proxy приводим к формату, который Telethon ожидает.
         """
+        handle_telethon_error()
         # 1) Получаем имя сессии (файл сессии Telethon)
         try:
             from config_telethon import SESSION_NAME as CONFIG_SESSION_NAME

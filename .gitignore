@@ -2,5 +2,6 @@ __pycache__/
 *.pyc
 .env
 config_telethon.py
+config.py
 *.session
 session_files/

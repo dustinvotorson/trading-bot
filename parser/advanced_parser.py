@@ -743,7 +743,7 @@ class AdvancedSignalParser:
                 'Открываю' in text and any(keyword in text for keyword in ['#LONG', '#SHORT', 'LONG', 'SHORT'])):
             return "ARTEMA"
         elif 'Nesterov Family' in text or 'нестеров' in text_lower:
-            return "NESTOEROV"
+            return "NESTEROV"
         elif 'прайват клаб' in text_lower or 'private club' in text_lower:
             return "PRIVATE"
         elif 'CryptoGrad' in text or 'криптоград' in text_lower:

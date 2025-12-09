@@ -28,7 +28,7 @@ class AdvancedSignalParser:
             'SEREBROV': ['serebrov', 'silver', 'серебров'],
             'CRYPTOFUTURES': ['cryptofutures', 'криптофьючерс'],
             'LIGHT': ['#light', 'лайт'],
-            'NESTOEROV': ['nesterov', 'family', 'нестеров'],
+            'NESTEROV': ['nesterov', 'family', 'нестеров'],
             'PRIVATE': ['private', 'club', 'прайват', 'клуб', 'прайват клаб', 'торговый букварь'],
             'VT': ['vt'],
             'WOLF_TRADING': ['wolf trading'],

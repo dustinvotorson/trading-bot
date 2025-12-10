@@ -449,51 +449,77 @@ class AdvancedSignalParser:
 
         return entry_prices, limit_prices, take_profits, stop_loss
 
-    def parse_cryptofutures(self, text: str) -> Tuple[List[float], List[float], Optional[float]]:
-        """Парсинг CryptoFutures - специальный парсер"""
+    def parse_cryptofutures(
+        self, text: str
+    ) -> Tuple[List[float], List[float], List[float], Optional[float]]:
+        """Парсинг CryptoFutures - специальный парсер.
+
+        Логика:
+        - Если строка содержит "Вход: Рынок и лимитка - 0.004570":
+            * entry_prices = [0.00457]  (ориентир входа)
+            * limit_prices = [0.00457]  (уровень лимитного усреднения)
+        - Если просто "Вход: 0.004570":
+            * entry_prices = [0.00457]
+            * limit_prices = []
+        """
         logger.info("🔧 Parsing CryptoFutures format")
 
-        entry_prices = []
-        take_profits = []
-        stop_loss = None
+        entry_prices: List[float] = []
+        limit_prices: List[float] = []
+        take_profits: List[float] = []
+        stop_loss: Optional[float] = None
 
         lines = text.split('\n')
 
         for line in lines:
             line_clean = line.strip()
+            line_lower = line_clean.lower()
 
-            # Вход: "Вход: Рынок и лимитка - 6.680"
-            if any(keyword in line_clean.lower() for keyword in ['вход:', 'entry:']):
-                # Ищем число после дефиса или двоеточия
-                prices = re.findall(r'[\s:-](\d+\.\d+)', line_clean)
+            # Вход: "Вход: Рынок и лимитка - 0.004570" или "Вход: 0.004570"
+            if any(keyword in line_lower for keyword in ['вход:', 'entry:']):
+                prices = re.findall(r'(\d+[.,]\d+)', line_clean.replace(',', '.'))
                 if prices:
                     try:
-                        entry_prices = [float(prices[0])]
-                        logger.info(f"🔧 Found CryptoFutures entry: {entry_prices}")
-                    except:
+                        price = float(prices[0].replace(',', '.'))
+
+                        if 'рынок' in line_lower and 'лимитк' in line_lower:
+                            # "рынок и лимитка" – заходим по рынку,
+                            # а указанную цену считаем уровнем усреднения
+                            entry_prices = [price]
+                            limit_prices = [price]
+                            logger.info(
+                                f"🔧 Found CryptoFutures market+limit: "
+                                f"entry={entry_prices}, limit={limit_prices}"
+                            )
+                        else:
+                            # Обычный вариант: просто вход по цене
+                            entry_prices = [price]
+                            logger.info(f"🔧 Found CryptoFutures entry: {entry_prices}")
+                    except Exception:
                         pass
 
-            # Цели: "Цели: 7.055 7.260 7.810"
-            elif any(keyword in line_clean.lower() for keyword in ['цели:', 'targets:']):
-                prices = re.findall(r'(\d+\.\d+)', line_clean)
+            # Цели
+            elif any(keyword in line_lower for keyword in ['цели', 'targets']):
+                prices = re.findall(r'(\d+[.,]\d+)', line_clean.replace(',', '.'))
                 if prices:
                     try:
-                        take_profits = [float(p) for p in prices]
+                        take_profits = [float(p.replace(',', '.')) for p in prices]
                         logger.info(f"🔧 Found CryptoFutures TPs: {take_profits}")
-                    except:
+                    except Exception:
                         pass
 
-            # Стоп-лосс: "Стоп: 6.455"
-            elif any(keyword in line_clean.lower() for keyword in ['стоп:', 'stop:']):
-                prices = re.findall(r'(\d+\.\d+)', line_clean)
+            # Стоп-лосс
+            elif any(keyword in line_lower for keyword in ['стоп', 'stop']):
+                prices = re.findall(r'(\d+[.,]\d+)', line_clean.replace(',', '.'))
                 if prices:
                     try:
-                        stop_loss = float(prices[0])
+                        stop_loss = float(prices[0].replace(',', '.'))
                         logger.info(f"🔧 Found CryptoFutures SL: {stop_loss}")
-                    except:
+                    except Exception:
                         pass
 
-        return entry_prices, take_profits, stop_loss
+        return entry_prices, limit_prices, take_profits, stop_loss
+
 
     def parse_khrustalev(self, text: str, source: str) -> TradeSignal:
         """Парсинг сигналов Хрусталева - УЛУЧШЕННАЯ ВЕРСИЯ"""
@@ -797,6 +823,8 @@ class AdvancedSignalParser:
             entry_prices, take_profits, stop_loss = self.parse_nesterov(text)
         elif detected_source == "PRIVATE":
             entry_prices, take_profits, stop_loss = self.parse_private_club(text)
+        elif detected_source == "CRYPTOFUTURES":
+            entry_prices, limit_prices, take_profits, stop_loss = self.parse_cryptofutures(text)    
         elif detected_source == "CRYPTOGRAD":
             entry_prices, take_profits, stop_loss = self.parse_cryptograd(text)
         else:

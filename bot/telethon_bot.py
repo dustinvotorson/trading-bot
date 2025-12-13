@@ -143,16 +143,45 @@ class TelethonTradingBot:
                 logger.info(f"🔕 Пропускаем предварительное объявление для {signal.symbol} - недостаточно данных")
                 return
 
-            # Для рыночных входов получаем текущую цену
-            if not signal.entry_prices and not signal.limit_prices:
+            # 🔥 УНИВЕРСАЛЬНОЕ ПРАВИЛО: ЕСЛИ НЕТ ЦЕНЫ ВХОДА → СЧИТАЕМ РЫНОЧНЫМ
+            # Проверяем три варианта:
+            # 1. Парсер сам определил как рыночный (is_market = True)
+            # 2. Нет entry_prices и limit_prices
+            # 3. Есть тейк-профиты (значит это не предварительное объявление)
+
+            is_market_condition = (
+                    signal.is_market or  # Парсер определил как рынок
+                    (not signal.entry_prices and not signal.limit_prices)  # Нет цен входа
+            )
+
+            if is_market_condition and signal.take_profits:
+                logger.info(f"🎯 Сигнал {signal.symbol} без цены входа → считаем рыночным")
+                signal.is_market = True  # Устанавливаем флаг
+
+                # Получаем текущую цену
                 current_price, exchange_used = await multi_exchange.get_current_price(signal.symbol)
                 if current_price:
                     signal.entry_prices = [current_price]
                     logger.info(
-                        f"💰 Рыночный вход - текущая цена {signal.symbol}: {current_price} (биржa: {exchange_used})")
+                        f"💰 Рыночный вход - текущая цена {signal.symbol}: {current_price} (биржа: {exchange_used})")
                 else:
-                    logger.warning(f"⚠️  Не удалось получить цену для {signal.symbol}")
-                    return
+                    logger.warning(
+                        f"⚠️  Не удалось получить цену для {signal.symbol}, пробуем альтернативный символ...")
+
+                    # Пробуем альтернативный формат (например, BCH вместо BCHUSDT)
+                    alt_symbol = signal.symbol.replace("USDT", "")
+                    current_price, exchange_used = await multi_exchange.get_current_price(alt_symbol)
+                    if current_price:
+                        signal.entry_prices = [current_price]
+                        logger.info(f"💰 Рыночный вход - альтернативная цена {alt_symbol}: {current_price}")
+                    else:
+                        logger.warning(f"⚠️  Не удалось получить цену для {signal.symbol}, пропускаем сигнал")
+                        return
+
+            # 🔥 КРИТИЧЕСКАЯ ПРОВЕРКА: Если после всех манипуляций все еще нет цены входа → пропускаем
+            elif not signal.entry_prices and not signal.limit_prices:
+                logger.info(f"🔕 Пропускаем сигнал {signal.symbol} - не удалось определить цену входа")
+                return
 
             # Сохраняем сигнал в активные
             signal_id = f"{signal.symbol}_{int(signal.timestamp)}"
@@ -170,10 +199,11 @@ class TelethonTradingBot:
                 'leverage': signal.leverage,
                 'margin': signal.margin,
                 'source': signal.source,
-                'pnl_percent': 0,  # Начальный PnL
+                'pnl_percent': 0,
                 'reached_tps': [],
                 'exchange': 'Unknown',
-                'timestamp': signal.timestamp
+                'timestamp': signal.timestamp,
+                'is_market': signal.is_market
             }
             trading_data.update_signal_data(signal_data)
             logger.info(f"💾 Сигнал сохранен в trading_data: {signal.symbol}")
@@ -189,6 +219,7 @@ class TelethonTradingBot:
             logger.info(f"   Плечо: {signal.leverage}")
             logger.info(f"   Маржа: {signal.margin}")
             logger.info(f"   Источник: {signal.source}")
+            logger.info(f"   Рыночный вход: {signal.is_market}")
             logger.info("-" * 60)
 
             # Запускаем мониторинг цены для этого сигнала
@@ -196,6 +227,8 @@ class TelethonTradingBot:
 
         except Exception as e:
             logger.error(f"❌ Ошибка обработки сообщения: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     def is_valid_trading_signal(self, signal, message_text: str) -> bool:
         """Проверяет, является ли сообщение полноценным торговым сигналом - УЛУЧШЕННАЯ ВЕРСИЯ"""
@@ -210,17 +243,14 @@ class TelethonTradingBot:
             logger.info(f"🔕 Пропускаем - направление не распознано")
             return False
 
-        # 3. Должны быть указаны цены входа
-        has_entry_prices = bool(signal.entry_prices)
-        if not has_entry_prices:
-            logger.info(f"🔕 Пропускаем - нет цен входа")
-            return False
-
-        # 4. Должны быть указаны тейк-профиты
+        # 3. Должны быть указаны тейк-профиты (если нет тейков - это предварительное объявление)
         has_take_profits = bool(signal.take_profits)
         if not has_take_profits:
-            logger.info(f"🔕 Пропускаем - нет тейк-профитов")
+            logger.info(f"🔕 Пропускаем - нет тейк-профитов (вероятно предварительное объявление)")
             return False
+
+        # 4. ВСЕ СИГНАЛЫ БЕЗ ЦЕНЫ ВХОДА СЧИТАЕМ РЫНОЧНЫМИ - НЕ ПРОПУСКАЕМ!
+        # Только если нет тейк-профитов - пропускаем (предварительное объявление)
 
         # 5. Проверяем конкретные данные в сообщении
         has_concrete_data = self.has_concrete_trading_data(message_text)

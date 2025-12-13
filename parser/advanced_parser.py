@@ -1,7 +1,7 @@
 import re
 import time
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -19,865 +19,534 @@ class TradeSignal:
     margin: Optional[float]
     source: str
     timestamp: float
+    is_market: bool = False  # Добавили флаг рыночного входа
 
 
-class AdvancedSignalParser:
+class UniversalSignalParser:
     def __init__(self):
-        self.sources_keywords = {
-            'CRYPTOGRAD': ['cryptograd', 'криптоград'],
-            'SEREBROV': ['serebrov', 'silver', 'серебров'],
-            'CRYPTOFUTURES': ['cryptofutures', 'криптофьючерс'],
-            'LIGHT': ['#light', 'лайт'],
-            'NESTEROV': ['nesterov', 'family', 'нестеров'],
-            'PRIVATE': ['private', 'club', 'прайват', 'клуб', 'прайват клаб', 'торговый букварь'],
-            'VT': ['vt'],
-            'WOLF_TRADING': ['wolf trading'],
-            'ARTEMA': ['артема'],
-            'KHRUSTALEV': ['хрусталев', 'khrustalev']
+        # База ключевых слов и паттернов
+        self.patterns = {
+            "direction": {
+                "long": ["long", "лонг", "buy", "купить", "вверх", "рост"],
+                "short": ["short", "шорт", "sell", "продать", "вниз", "падение"]
+            },
+            "entry": [
+                "вход", "entry", "твх", "точка входа", "входим", "вход:",
+                "entry:", "входная", "вход по", "цена входа", "take entry"
+            ],
+            "take_profit": [
+                "тейк", "профит", "цель", "target", "tp", "цели:",
+                "take profit", "тейк-профит", "по целям", "ориентировочные цели",
+                "фиксация", "фиксируем", "цели", "targets", "цели :", "тейки:",
+                "тейк-профит -", "точки фиксации", "фиксации"
+            ],
+            "stop_loss": [
+                "стоп", "стоп-лосс", "stop", "sl", "stop loss", "лосс",
+                "стоп лосс", "стоп:", "stop:", "стоп :", "стоп-лосс:", "стоп :", "стоп-лосс -"
+            ],
+            "market": ["рынок", "market", "по рынку", "маркет", "market entry", "MARKET"],
+            "limit": ["лимит", "limit", "лимитка", "лимитный", "лимитный ордер", "лимитный ордер на"],
+            "leverage": ["плечо", "leverage", "x", "кратность", "leverage:", "плечо:", "ливеридж"],
+            "margin": ["маржа", "margin", "депозит", "депо", "риск", "объем", "% от", "на %"],
+            "average": ["усреднение", "добор", "average", "добавить", "add"],
+            "separators": {
+                "range": ["-", "—", "до", "по", "или", "и"],
+                "list": [",", ";", "|", "/", "и", "или", ":", "—", "-"],
+                "decimal": [".", ","]
+            }
         }
 
-    def is_preliminary_announcement(self, text: str) -> bool:
-        """Определяет, является ли сообщение предварительным объявлением"""
+        # Список стоп-слов для игнорирования при поиске символа
+        self.stop_words = {
+            'LONG', 'SHORT', 'USDT', 'BTC', 'ETH', 'TP', 'SL',
+            'ENTRY', 'STOP', 'LOSS', 'TAKE', 'PROFIT', 'TARGET',
+            'X', 'ВХОД', 'ВЫХОД', 'СТОП', 'ЦЕЛЬ', 'ДОБОР',
+            'NESTEROV', 'FAMILY', 'TWO', 'FINGERS', 'PRIVATE',
+            'CLUB', 'CRYPTO', 'FUTURES', 'COINFY', 'CRYPTOGRAD',
+            'SHEF', 'FINANSIST', 'ЗАКРЫТОЕ', 'СООБЩЕСТВО', 'ШАФИНАНСИСТ'
+        }
+
+    def normalize_text(self, text: str) -> str:
+        """Нормализует текст для обработки"""
+        # Удаляем форматирование Markdown (жирный, курсив)
+        normalized = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # **text** -> text
+        normalized = re.sub(r'\*(.*?)\*', r'\1', normalized)  # *text* -> text
+        normalized = re.sub(r'__(.*?)__', r'\1', normalized)  # __text__ -> text
+        normalized = re.sub(r'_(.*?)_', r'\1', normalized)  # _text_ -> text
+
+        # Заменяем запятые на точки в числах
+        def replace_comma(match):
+            num = match.group(0)
+            if ',' in num:
+                parts = num.split(',')
+                if len(parts) == 2 and parts[1].replace(' ', '').isdigit():
+                    return parts[0] + '.' + parts[1]
+            return num
+
+        normalized = re.sub(r'\d+,\d+', replace_comma, normalized)
+
+        # Удаляем тильду и знаки валют
+        normalized = re.sub(r'[~\$\€\₽]', '', normalized)
+
+        return normalized
+
+    def detect_source(self, text: str, channel_name: str) -> str:
+        """Определяет источник сигнала по ключевым словам и первой строке"""
+        lines = [line.strip() for line in text.strip().split('\n') if line.strip()]
+
+        if not lines:
+            return channel_name.upper()
+
         text_lower = text.lower()
 
-        # Паттерны, указывающие на предварительное объявление
-        preliminary_patterns = [
-            r'готовься',
-            r'приготовь',
-            r'скоро',
-            r'будет',
-            r'следи',
-            r'внимание',
-            r'объявляю',
-            r'анонс',
-            r'предупреждение',
-            r'жду',
-            r'ожидай',
-            r'следующ',
-        ]
+        # Проверяем по известным источникам в тексте
+        sources = {
+            "NESTEROV": ["nesterov", "family", "нестеров"],
+            "CRYPTOGRAD": ["cryptograd", "криптоград"],
+            "PRIVATE_CLUB": ["private", "club", "прайват", "клуб", "прайват клаб"],
+            "CRYPTOFUTURES": ["cryptofutures", "криптофьючерс"],
+            "COINFY": ["coinfy", "коинфи"],
+            "TWO_FINGERS": ["two fingers", "ту фингерс"],
+            "SHEF_FINANSIST": ["шеф финансист", "shef finansist"]
+        }
 
-        # Если есть эти слова и мало конкретных данных
-        has_preliminary_keywords = any(re.search(pattern, text_lower) for pattern in preliminary_patterns)
+        for source_name, keywords in sources.items():
+            for keyword in keywords:
+                if keyword in text_lower:
+                    return source_name
 
-        # Считаем количество конкретных торговых данных
-        trading_data_patterns = [
-            r'\d+[.,]\d+\s*\$',
-            r'[TТ][PП]\d*\s*:?\s*\d+[.,]\d+',
-            r'стоп\s*лосс\s*\d+[.,]\d+',
-            r'вход\s*:?\s*\d+[.,]\d+',
-        ]
+        # Проверяем характерные признаки CryptoGrad
+        has_cryptograd_format = (
+                re.search(r'точка входа:.*?лимитный ордер', text_lower) or
+                re.search(r'ориентировочные цели:', text_lower) or
+                re.search(r'маржа: кросс', text_lower)
+        )
 
-        concrete_data_count = sum(1 for pattern in trading_data_patterns if re.search(pattern, text, re.IGNORECASE))
+        if has_cryptograd_format:
+            return "CRYPTOGRAD"
 
-        # Если есть ключевые слова предварительного объявления и мало конкретных данных
-        if has_preliminary_keywords and concrete_data_count < 2:
-            return True
+        # Ищем источник в первых строках (пропускаем строки с символами и направлениями)
+        for i, line in enumerate(lines[:3]):
+            line_lower = line.lower()
+            line_upper = line.upper()
 
-        return False
+            # Пропускаем строки, которые являются символом
+            is_symbol_line = (
+                    line.startswith('#') or
+                    line.startswith('$') or
+                    line.startswith('🎤') or
+                    re.search(r'/USDT', line_upper) or
+                    re.search(r'\b(?:LONG|SHORT)\b', line_upper) or
+                    len(line.split()) <= 2
+            )
 
-    def extract_all_numbers(self, text: str) -> List[float]:
-        """Извлекает все числа из текста"""
-        numbers = []
-        normalized_text = text.replace(',', '.')
+            if not is_symbol_line:
+                # Очищаем строку от эмодзи и спецсимволов
+                clean_line = re.sub(r'[^\w\s]', '', line).strip()
+                if clean_line and len(clean_line) > 2:
+                    # Если строка похожа на название (не содержит цифр и специальных символов)
+                    if not re.search(r'\d', clean_line) and not re.search(r'[^\w\s]', clean_line):
+                        # Берем первое слово
+                        first_word = clean_line.split()[0]
+                        if len(first_word) > 2:
+                            return first_word.upper()
 
-        # Ищем числа с плавающей точкой
-        float_matches = re.findall(r'\d+\.\d+', normalized_text)
-        numbers = [float(match) for match in float_matches]
+        # Если ничего не нашли, возвращаем имя канала
+        return channel_name.upper()
 
-        return list(dict.fromkeys(numbers))
+    def extract_symbol(self, text: str) -> str:
+        """Извлекает символ из текста - универсальный метод"""
+        lines = text.split('\n')
+
+        for line in lines:
+            line_upper = line.upper().strip()
+
+            # Удаляем эмодзи и специальные символы
+            clean_line = re.sub(r'[^\w\s/#$]', '', line_upper).strip()
+
+            # 1. #SYMBOL или #SYMBOLUSDT
+            match = re.search(r'#([A-Z0-9]{2,10})(?:USDT)?\b', clean_line)
+            if match:
+                symbol = match.group(1)
+                if symbol not in self.stop_words:
+                    return self.normalize_symbol(symbol)
+
+            # 2. $SYMBOL (особенно для Two Fingers: ✅$ Zec)
+            match = re.search(r'\$([A-Z0-9]{2,10})\b', clean_line)
+            if match:
+                symbol = match.group(1)
+                if symbol not in self.stop_words:
+                    return self.normalize_symbol(symbol)
+
+            # 3. SYMBOL/USDT (особенно для Шеф Финансист: 🎤BCH/USDT)
+            match = re.search(r'\b([A-Z0-9]{2,10})/USDT\b', clean_line)
+            if match:
+                return self.normalize_symbol(match.group(1))
+
+            # 4. SYMBOL USDT
+            match = re.search(r'\b([A-Z0-9]{2,10})\s+USDT\b', clean_line)
+            if match:
+                return self.normalize_symbol(match.group(1))
+
+            # 5. SYMBOL LONG/SHORT (но только если символ не является стоп-словом)
+            match = re.search(r'\b([A-Z0-9]{2,10})\s+(?:LONG|SHORT)\b', clean_line)
+            if match:
+                symbol = match.group(1)
+                if (symbol not in self.stop_words and
+                        not re.match(r'\d+[A-Z]+', symbol)):  # Исключаем 1000PEPE
+                    return self.normalize_symbol(symbol)
+
+            # 6. LONG/SHORT SYMBOL
+            match = re.search(r'\b(?:LONG|SHORT)\s+([A-Z0-9]{2,10})\b', clean_line)
+            if match:
+                symbol = match.group(1)
+                if symbol not in self.stop_words:
+                    return self.normalize_symbol(symbol)
+
+            # 7. Исключение для 1000PEPE - теперь преобразуем в PEPE
+            if re.search(r'1000PEPE', clean_line):
+                return "PEPEUSDT"
+
+        # Если не нашли явно, ищем любую аббревиатуру
+        for line in lines:
+            clean_line = re.sub(r'[^\w\s]', '', line.upper())
+            words = re.findall(r'\b[A-Z0-9]{2,8}\b', clean_line)
+            for word in words:
+                if (word not in self.stop_words and
+                        not word.isdigit() and
+                        len(word) >= 2 and
+                        not re.fullmatch(r'\d+[XХ]', word)):
+                    # Проверяем, не является ли это числом с буквами (типа 1000PEPE)
+                    if re.match(r'\d+[A-Z]+', word):
+                        # Если это что-то вроде 1000PEPE, берем только буквенную часть
+                        match_letters = re.search(r'[A-Z]+', word)
+                        if match_letters:
+                            return self.normalize_symbol(match_letters.group(0))
+                        continue
+                    return self.normalize_symbol(word)
+
+        return "UNKNOWN"
 
     def normalize_symbol(self, symbol: str) -> str:
         """Приводит символ к стандартному формату"""
-        symbol = symbol.replace('/', '').replace('#', '').upper()
+        symbol = symbol.replace('/', '').replace('#', '').replace('$', '').upper()
         if not symbol.endswith('USDT'):
             symbol += 'USDT'
         return symbol
 
-    def parse_cryptograd(self, text: str) -> Tuple[List[float], List[float], Optional[float]]:
-        """Парсинг CryptoGrad - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
-        logger.info("🔧 Parsing CryptoGrad format")
-
-        entry_prices = []
-        take_profits = []
-        stop_loss = None
-
-        lines = text.split('\n')
-
-        # Флаг для отслеживания секции тейк-профитов
-        in_take_profits_section = False
-
-        for line in lines:
-            line_clean = line.strip()
-
-            # Поиск входа - разные форматы
-            if any(keyword in line_clean.lower() for keyword in ['точка входа', 'entry']):
-                prices = re.findall(r'(\d+[.,]\d+)', line_clean.replace(',', '.'))
-                if prices:
-                    entry_prices = [float(prices[0])]
-                    logger.info(f"🔧 Found CryptoGrad entry: {entry_prices}")
-
-            # Поиск тейк-профитов - ТОЛЬКО в секции целей
-            elif any(
-                    keyword in line_clean.lower() for keyword in ['ориентировочные цели', 'цели', 'take profit', 'tp']):
-                in_take_profits_section = True
-                prices = re.findall(r'(\d+[.,]\d+)', line_clean.replace(',', '.'))
-                if prices:
-                    # Для LONG сделки фильтруем только тейки ВЫШЕ цены входа
-                    if entry_prices:
-                        filtered_prices = [float(p) for p in prices if float(p) > entry_prices[0]]
-                        take_profits.extend(filtered_prices)
-                        logger.info(f"🔧 Found CryptoGrad TPs (filtered): {filtered_prices}")
-                    else:
-                        take_profits.extend([float(p) for p in prices])
-                        logger.info(f"🔧 Found CryptoGrad TPs: {take_profits}")
-
-            # Поиск стоп-лосса
-            elif any(keyword in line_clean.lower() for keyword in ['стоп', 'stop loss', 'sl']):
-                in_take_profits_section = False
-                prices = re.findall(r'(\d+[.,]\d+)', line_clean.replace(',', '.'))
-                if prices:
-                    stop_loss = float(prices[0])
-                    logger.info(f"🔧 Found CryptoGrad SL: {stop_loss}")
-
-            # Если мы в секции тейк-профитов, продолжаем собирать (для многострочных целей)
-            elif in_take_profits_section:
-                # Проверяем, не началась ли следующая секция
-                if any(keyword in line_clean.lower() for keyword in ['стоп', 'маржа', 'margin', 'кросс']):
-                    in_take_profits_section = False
-                else:
-                    # Продолжаем собирать тейк-профиты
-                    prices = re.findall(r'(\d+[.,]\d+)', line_clean.replace(',', '.'))
-                    if prices and entry_prices:
-                        filtered_prices = [float(p) for p in prices if float(p) > entry_prices[0]]
-                        take_profits.extend(filtered_prices)
-                        logger.info(f"🔧 Found additional CryptoGrad TPs: {filtered_prices}")
-
-        # Убираем дубликаты и сортируем
-        take_profits = sorted(list(set(take_profits)))
-
-        return entry_prices, take_profits, stop_loss
-
-    def parse_nesterov(self, text: str) -> Tuple[List[float], List[float], Optional[float]]:
-        """Парсинг Nesterov Family - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
-        logger.info("🔧 Parsing Nesterov format")
-
-        entry_prices = []
-        take_profits = []
-        stop_loss = None
-
-        lines = text.split('\n')
-
-        for line in lines:
-            line_clean = line.strip()
-
-            # Диапазон входов: "Твх: 656-658" или "Твх: 1.0930-1.0980"
-            if any(keyword in line_clean.lower() for keyword in ['твх:', 'вход:', 'entry:']):
-                # Ищем диапазон типа 656-658 или 1.0930-1.0980
-                range_match = re.search(r'(\d+\.?\d*)[^\d]*-[^\d]*(\d+\.?\d*)', line_clean)
-                if range_match:
-                    try:
-                        price1 = float(range_match.group(1))
-                        price2 = float(range_match.group(2))
-                        entry_prices = [price1, price2]
-                        logger.info(f"🔧 Found Nesterov entry range: {entry_prices}")
-                    except:
-                        pass
-                else:
-                    # Ищем одиночные цены
-                    prices = re.findall(r'\d+\.?\d*', line_clean)
-                    if prices:
-                        try:
-                            entry_prices = [float(prices[0])]
-                            logger.info(f"🔧 Found Nesterov entry: {entry_prices}")
-                        except:
-                            pass
-
-            # Тейк-профиты: "По целям: 651.72, 645.14, 638.56, 631.97"
-            elif any(keyword in line_clean.lower() for keyword in ['по целям', 'цели', 'targets']):
-                prices = re.findall(r'\d+\.\d+', line_clean)
-                if prices:
-                    try:
-                        take_profits = [float(p) for p in prices]
-                        logger.info(f"🔧 Found Nesterov TPs: {take_profits}")
-                    except:
-                        pass
-
-            # Стоп-лосс
-            elif any(keyword in line_clean.lower() for keyword in ['стоп', 'stop']):
-                prices = re.findall(r'\d+\.\d+', line_clean)
-                if prices:
-                    try:
-                        stop_loss = float(prices[0])
-                        logger.info(f"🔧 Found Nesterov SL: {stop_loss}")
-                    except:
-                        pass
-
-        return entry_prices, take_profits, stop_loss
-
-    def parse_private_club(self, text: str) -> Tuple[List[float], List[float], Optional[float]]:
-        """Парсинг Private Club - УЛУЧШЕННАЯ ВЕРСИЯ"""
-        logger.info("🔧 Parsing Private Club format")
-
-        entry_prices = []
-        take_profits = []
-        stop_loss = None
-
-        lines = text.split('\n')
-
-        for line in lines:
-            line_clean = line.strip()
-
-            # Вход: "Точка входа: 0.003422"
-            if any(keyword in line_clean.lower() for keyword in ['точка входа', 'entry']):
-                prices = re.findall(r'\d+\.\d+', line_clean)
-                if prices:
-                    entry_prices = [float(prices[0])]
-                    logger.info(f"🔧 Found Private Club entry: {entry_prices}")
-
-            # Точки фиксации: "Точки фиксации: 0.003466, 0.003490, ..."
-            elif any(keyword in line_clean.lower() for keyword in ['точки фиксации', 'take profit', 'tp']):
-                prices = re.findall(r'\d+\.\d+', line_clean)
-                if prices:
-                    take_profits = [float(p) for p in prices]
-                    logger.info(f"🔧 Found Private Club TPs: {take_profits}")
-
-        return entry_prices, take_profits, stop_loss
-
-    def parse_wolf_trading(self, text: str) -> Tuple[List[float], List[float], List[float], Optional[float]]:
-        """Парсинг Wolf Trading - УЛУЧШЕННАЯ ВЕРСИЯ"""
-        logger.info("🔧 Parsing Wolf Trading format")
-
-        entry_prices = []
-        limit_prices = []
-        take_profits = []
-        stop_loss = None
-        leverage = 1
-
-        lines = text.split('\n')
-
-        for line in lines:
-            line_clean = line.strip()
-
-            # Определяем направление и символ
-            if line_clean.startswith('LONG') or line_clean.startswith('SHORT'):
-                # Ищем плечо (50X)
-                leverage_match = re.search(r'(\d+)X', line_clean)
-                if leverage_match:
-                    leverage = int(leverage_match.group(1))
-
-            # Цена входа (рыночный вход)
-            elif line_clean.startswith('TAKE ENTRY'):
-                try:
-                    entry_price = float(line_clean.split()[-1])
-                    entry_prices = [entry_price]
-                    logger.info(f"🔧 Found Wolf Trading entry: {entry_prices}")
-                except:
-                    pass
-
-            # Тейк-профиты
-            elif line_clean.startswith('SET TP'):
-                try:
-                    tp_price = float(line_clean.split()[-1])
-                    take_profits.append(tp_price)
-                    logger.info(f"🔧 Found Wolf Trading TP: {tp_price}")
-                except:
-                    pass
-
-            # Стоп-лосс
-            elif line_clean.startswith('SET SL'):
-                try:
-                    stop_loss = float(line_clean.split()[-1])
-                    logger.info(f"🔧 Found Wolf Trading SL: {stop_loss}")
-                except:
-                    pass
-
-        # Сортируем тейк-профиты
-        take_profits.sort()
-
-        return entry_prices, limit_prices, take_profits, stop_loss
-
-    def parse_artema(self, text: str) -> Tuple[List[float], List[float], List[float], Optional[float]]:
-        """Парсинг сигналов от Артема - ПОЛНОСТЬЮ ПЕРЕРАБОТАННАЯ ВЕРСИЯ"""
-        logger.info("🔧 Parsing Artema format")
-
-        entry_prices = []
-        limit_prices = []
-        take_profits = []
-        stop_loss = None
-
-        # Очищаем текст от лишних символов
-        clean_text = text.replace('**', '').replace('*', '').replace('•', '')
-        lines = [line.strip() for line in clean_text.split('\n') if line.strip()]
-
-        # 1. Парсим цены входа и лимитные ордера - ТОЧНЫЙ ПОИСК
-        for i, line in enumerate(lines):
-            line_clean = line.lower()
-
-            # Точный поиск цен входа
-            if 'значение для входа:' in line_clean:
-                # Ищем число после "Значение для входа:"
-                matches = re.findall(r'значение для входа:\s*(\d+[.,]\d+)', line_clean)
-                for match in matches:
-                    try:
-                        price = float(match.replace(',', '.'))
-                        if 0.1 <= price <= 100:  # ETHFI диапазон
-                            limit_prices.append(price)
-                            logger.info(f"🔧 Found Artema entry price: {price}")
-                    except:
-                        pass
-
-            # Поиск доборов
-            elif 'добор' in line_clean and not any(x in line_clean for x in ['%', 'фикс']):
-                # Ищем числа в строке с добором, исключая проценты
-                matches = re.findall(r'(\d+[.,]\d+)', line_clean)
-                for match in matches:
-                    try:
-                        price = float(match.replace(',', '.'))
-                        # Фильтруем: должны быть цены, а не проценты
-                        if 0.1 <= price <= 100 and price not in limit_prices:
-                            limit_prices.append(price)
-                            logger.info(f"🔧 Found Artema add entry: {price}")
-                    except:
-                        pass
-
-        # 2. Парсим тейк-профиты - ОСНОВНОЙ ФОКУС
-        # Ищем секцию с TP
-        in_tp_section = False
-        tp_lines = []
-
-        for line in lines:
-            line_clean = line.lower()
-
-            # Начало секции TP
-            if any(keyword in line_clean for keyword in ['tp1:', 'тейк']):
-                in_tp_section = True
-
-            # Конец секции TP
-            if any(keyword in line_clean for keyword in ['стоп', 'sl', 'stop']):
-                in_tp_section = False
-
-            if in_tp_section and any(keyword in line_clean for keyword in ['tp', 'тейк']):
-                tp_lines.append(line)
-
-        # Парсим TP из найденных строк
-        for line in tp_lines:
-            # Убираем текст в скобках (проценты объема)
-            line_without_brackets = re.sub(r'\([^)]*\)', '', line)
-
-            # Ищем TP в разных формаats
-            tp_patterns = [
-                r'TP\s*\d*\s*:?\s*(\d+[.,]?\d*)\s*\$?',  # TP1: 3$ или TP1: 3.0
-                r'(\d+[.,]?\d*)\s*\$',  # 3$ или 3.0$
-                r'TP\s*\d*\s*:?\s*(\d+[.,]\d+)',  # TP1: 0.48
-                r'(\d+[.,]\d+)(?:\s|$)',  # 0.48 (в конце строки)
-            ]
-
-            for pattern in tp_patterns:
-                matches = re.findall(pattern, line_without_brackets, re.IGNORECASE)
-                for match in matches:
-                    try:
-                        price = float(match.replace(',', '.'))
-                        # Строгая фильтрация тейк-профитов
-                        if (0.1 <= price <= 1000 and
-                                price not in take_profits and
-                                not (0 < price < 1 and price in [0.3, 0.2]) and  # Исключаем проценты маржи
-                                not (price > 10 and price % 1 == 0 and price in [20, 30,
-                                                                                 50])):  # Исключаем проценты объема
-                            take_profits.append(price)
-                            logger.info(f"🔧 Found Artema TP: {price} from: {line.strip()}")
-                    except:
-                        pass
-
-        # 3. Парсим стоп-лосс отдельно
-        for line in lines:
-            line_clean = line.lower()
-            if any(keyword in line_clean for keyword in ['стоп', 'sl', 'stop']):
-                # Ищем число после ключевых слов стоп-лосса
-                sl_matches = re.findall(r'стоп[^\d]*(\d+[.,]\d+)', line_clean)
-                if not sl_matches:
-                    sl_matches = re.findall(r'(\d+[.,]\d+)', line_clean)
-
-                if sl_matches:
-                    try:
-                        stop_loss = float(sl_matches[0].replace(',', '.'))
-                        # Проверяем, что стоп-лосс реалистичный
-                        if 0.01 <= stop_loss <= 100:
-                            logger.info(f"🔧 Found Artema SL: {stop_loss}")
-                            break
-                    except:
-                        pass
-
-        # 4. Обработка и фильтрация результатов
-        # Убираем дубликаты и сортируем
-        limit_prices = sorted(list(set(limit_prices)))
-        take_profits = sorted(list(set(take_profits)))
-
-        # Фильтруем тейк-профиты: для LONG должны быть больше цены входа
-        if limit_prices and take_profits:
-            main_entry = limit_prices[0]  # Основная цена входа
-            filtered_tps = []
-            for tp in take_profits:
-                if tp > main_entry:  # Для LONG тейк-профиты должны быть выше цены входа
-                    filtered_tps.append(tp)
-                else:
-                    logger.info(f"🔧 Filtered out TP {tp} (not greater than entry {main_entry})")
-            take_profits = filtered_tps
-
-        # Устанавливаем основную цену входа
-        if limit_prices and not entry_prices:
-            entry_prices = [limit_prices[0]]  # Первая цена как основной вход
-
-        # Если нет тейк-профитов, но есть текст с TP, пробуем альтернативный метод
-        if not take_profits and any('tp' in line.lower() for line in lines):
-            logger.info("🔧 Alternative TP parsing...")
-            # Пробуем найти любые числа после TP в тексте
-            for line in lines:
-                if 'tp' in line.lower():
-                    # Ищем все числа в строке с TP
-                    numbers = re.findall(r'(\d+[.,]\d+)', line)
-                    for num in numbers:
-                        try:
-                            price = float(num.replace(',', '.'))
-                            if 0.1 <= price <= 100 and price not in take_profits:
-                                take_profits.append(price)
-                        except:
-                            pass
-            take_profits = sorted(list(set(take_profits)))
-
-        logger.info(
-            f"🔧 Final Artema - Entries: {entry_prices}, Limits: {limit_prices}, TPs: {take_profits}, SL: {stop_loss}")
-
-        return entry_prices, limit_prices, take_profits, stop_loss
-
-    def parse_cryptofutures(
-        self, text: str
-    ) -> Tuple[List[float], List[float], List[float], Optional[float]]:
-        """Парсинг CryptoFutures - специальный парсер.
-
-        Логика:
-        - Если строка содержит "Вход: Рынок и лимитка - 0.004570":
-            * entry_prices = [0.00457]  (ориентир входа)
-            * limit_prices = [0.00457]  (уровень лимитного усреднения)
-        - Если просто "Вход: 0.004570":
-            * entry_prices = [0.00457]
-            * limit_prices = []
-        """
-        logger.info("🔧 Parsing CryptoFutures format")
-
-        entry_prices: List[float] = []
-        limit_prices: List[float] = []
-        take_profits: List[float] = []
-        stop_loss: Optional[float] = None
-
-        lines = text.split('\n')
-
-        for line in lines:
-            line_clean = line.strip()
-            line_lower = line_clean.lower()
-
-            # Вход: "Вход: Рынок и лимитка - 0.004570" или "Вход: 0.004570"
-            if any(keyword in line_lower for keyword in ['вход:', 'entry:']):
-                prices = re.findall(r'(\d+[.,]\d+)', line_clean.replace(',', '.'))
-                if prices:
-                    try:
-                        price = float(prices[0].replace(',', '.'))
-
-                        if 'рынок' in line_lower and 'лимитк' in line_lower:
-                            # "рынок и лимитка" – заходим по рынку,
-                            # а указанную цену считаем уровнем усреднения
-                            entry_prices = [price]
-                            limit_prices = [price]
-                            logger.info(
-                                f"🔧 Found CryptoFutures market+limit: "
-                                f"entry={entry_prices}, limit={limit_prices}"
-                            )
-                        else:
-                            # Обычный вариант: просто вход по цене
-                            entry_prices = [price]
-                            logger.info(f"🔧 Found CryptoFutures entry: {entry_prices}")
-                    except Exception:
-                        pass
-
-            # Цели
-            elif any(keyword in line_lower for keyword in ['цели', 'targets']):
-                prices = re.findall(r'(\d+[.,]\d+)', line_clean.replace(',', '.'))
-                if prices:
-                    try:
-                        take_profits = [float(p.replace(',', '.')) for p in prices]
-                        logger.info(f"🔧 Found CryptoFutures TPs: {take_profits}")
-                    except Exception:
-                        pass
-
-            # Стоп-лосс
-            elif any(keyword in line_lower for keyword in ['стоп', 'stop']):
-                prices = re.findall(r'(\d+[.,]\d+)', line_clean.replace(',', '.'))
-                if prices:
-                    try:
-                        stop_loss = float(prices[0].replace(',', '.'))
-                        logger.info(f"🔧 Found CryptoFutures SL: {stop_loss}")
-                    except Exception:
-                        pass
-
-        return entry_prices, limit_prices, take_profits, stop_loss
-
-
-    def parse_khrustalev(self, text: str, source: str) -> TradeSignal:
-        """Парсинг сигналов Хрусталева - УЛУЧШЕННАЯ ВЕРСИЯ"""
-        logger.info("🔧 Parsing Khrustalev format")
-
-        symbol = "UNKNOWN"
-        direction = "UNKNOWN"
-        entry_prices = []
-        take_profits = []
-        stop_loss = None
-
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
-
-        logger.info(f"🔧 Khrustalev lines: {lines}")
-
-        # Определяем тип сообщения
-        has_symbol_direction = any(any(word in line.upper() for word in ['LONG', 'SHORT']) for line in lines)
-        has_entry = any('твх:' in line.lower() for line in lines)
-        has_targets = any('цели:' in line.lower() for line in lines)
-
-        # 1. Парсим символ и направление (только если есть в сообщении)
-        if has_symbol_direction:
-            for line in lines:
-                line_upper = line.upper()
-                if any(word in line_upper for word in ['LONG', 'SHORT']):
-                    # Используем улучшенный метод извлечения символа
-                    symbol = self.extract_symbol_improved(line)
-                    if symbol == "UNKNOWN":
-                        # Пробуем извлечь символ из строки вручную
-                        words = line_upper.split()
-                        for i, word in enumerate(words):
-                            if word in ['LONG', 'SHORT'] and i > 0:
-                                symbol_candidate = words[i - 1]
-                                symbol = self.normalize_symbol(symbol_candidate)
-                                break
-
-                    direction = "LONG" if "LONG" in line_upper else "SHORT"
-                    logger.info(f"🔧 Found Khrustalev symbol: {symbol}, direction: {direction}")
-                    break
-
-        # 2. Парсим точку входа (твх)
-        if has_entry:
-            for line in lines:
-                line_lower = line.lower()
-                if 'твх:' in line_lower:
-                    matches = re.findall(r'твх:\s*(\d+[.,]\d+)', line_lower)
-                    for match in matches:
-                        try:
-                            price = float(match.replace(',', '.'))
-                            entry_prices = [price]
-                            logger.info(f"🔧 Found Khrustalev entry: {price}")
-                        except:
-                            pass
-
-        # 3. Парсим цели - УЛУЧШЕННЫЙ ПАРСИНГ
-        if has_targets:
-            in_targets_section = False
-            for line in lines:
-                line_clean = line.strip()
-                line_lower = line_clean.lower()
-
-                if 'цели:' in line_lower:
-                    in_targets_section = True
-                    continue
-
-                if in_targets_section:
-                    # Если нашли "добор:", выходим из секции целей
-                    if 'добор:' in line_lower:
-                        in_targets_section = False
-                    else:
-                        # Ищем числа в строке (только если строка не пустая и не содержит других ключевых слов)
-                        if line_clean and not any(keyword in line_lower for keyword in ['твх:', 'long', 'short']):
-                            matches = re.findall(r'(\d+[.,]\d+)', line_clean)
-                            for match in matches:
-                                try:
-                                    price = float(match.replace(',', '.'))
-                                    if 0.001 < price < 1000 and price not in take_profits:
-                                        take_profits.append(price)
-                                        logger.info(f"🔧 Found Khrustalev TP: {price}")
-                                except:
-                                    pass
-
-        # 4. Парсим добор (стоп-лосс)
-        for line in lines:
-            line_lower = line.lower()
-            if 'добор:' in line_lower:
-                matches = re.findall(r'добор:\s*(\d+[.,]\d+)', line_lower)
-                if matches:
-                    try:
-                        stop_loss = float(matches[0].replace(',', '.'))
-                        logger.info(f"🔧 Found Khrustalev SL: {stop_loss}")
-                    except:
-                        pass
-
-        # Сортируем тейк-профиты
-        take_profits.sort()
-
-        logger.info(f"🔧 Khrustalev result - Symbol: {symbol}, Direction: {direction}, " +
-                    f"Entries: {entry_prices}, TPs: {take_profits}, SL: {stop_loss}")
-
-        return TradeSignal(
-            symbol=symbol,
-            direction=direction,
-            entry_prices=entry_prices,
-            limit_prices=[],
-            take_profits=take_profits,
-            stop_loss=stop_loss,
-            leverage=1,
-            margin=None,
-            source=source,
-            timestamp=time.time()
-        )
+    def extract_direction(self, text: str) -> str:
+        """Определяет направление сделки"""
+        text_lower = text.lower()
+
+        # Сначала проверяем точные совпадения
+        if re.search(r'\bLONG\b', text.upper()):
+            return "LONG"
+        if re.search(r'\bSHORT\b', text.upper()):
+            return "SHORT"
+
+        # Затем ключевые слова
+        for keyword in self.patterns["direction"]["long"]:
+            if re.search(r'\b' + re.escape(keyword) + r'\b', text_lower):
+                return "LONG"
+
+        for keyword in self.patterns["direction"]["short"]:
+            if re.search(r'\b' + re.escape(keyword) + r'\b', text_lower):
+                return "SHORT"
+
+        return "UNKNOWN"
 
     def extract_leverage(self, text: str) -> Optional[int]:
-        """Извлекает плечо - УЛУЧШЕННАЯ ВЕРСИЯ"""
+        """Извлекает плечо"""
+        text_upper = text.upper()
+
+        # Ищем паттерны типа 50X, 20x
         patterns = [
-            r'(\d+)[xх]\s',
-            r'\s(\d+)[xх]',
-            r'[Пп]лечо[^\d]*(\d+)',
-            r'[Лл]иверидж[^\d]*(\d+)',
-            r'(\d+)[xх]',
-            r'LONG\s+(\d+)x',
-            r'SHORT\s+(\d+)x',
-            r'(\d+)[xх]',  # Дублируем для надежности
+            r'(\d+)[XХ]\b',
+            r'\b(\d+)\s*[XХ]\b',
+            r'ПЛЕЧО[^\d]*(\d+)',
+            r'LEVERAGE[^\d]*(\d+)',
+            r'\b(\d+)X\s*LEVERAGE',
         ]
 
         for pattern in patterns:
-            leverage_match = re.search(pattern, text, re.IGNORECASE)
-            if leverage_match:
+            match = re.search(pattern, text_upper)
+            if match:
                 try:
-                    leverage = int(leverage_match.group(1))
-                    logger.info(f"🔧 Found leverage {leverage}")
-                    return leverage
+                    leverage = int(match.group(1))
+                    if 1 <= leverage <= 100:
+                        return leverage
                 except:
                     continue
+
+        # Для Two Fingers: 10-50x -> берем максимальное
+        range_match = re.search(r'(\d+)\s*[-—]\s*(\d+)\s*[XХ]', text_upper)
+        if range_match:
+            try:
+                leverage1 = int(range_match.group(1))
+                leverage2 = int(range_match.group(2))
+                return max(leverage1, leverage2)
+            except:
+                pass
+
         return 1
 
     def extract_margin(self, text: str) -> Optional[float]:
-        """Извлекает маржу - УЛУЧШЕННАЯ ВЕРСИЯ"""
-        # Ищем проценты маржи в контексте депозита
-        margin_patterns = [
-            r'(\d+[.,]\d+)%\s*от\s*депозита',
-            r'(\d+)%\s*от\s*депозита',
-            r'маржа\s*(\d+[.,]?\d*)%',
-            r'(\d+[.,]?\d*)%\s*объем',
-            r'фикс\s*(\d+)[.,]?\d*\s*%',  # "фикс 20% объема"
-            r'(\d+[.,]?\d*)%\s*от\s*торгового',
+        """Извлекает маржу (% от депозита)"""
+        text_lower = text.lower()
+
+        patterns = [
+            r'(\d+(?:[.,]\d+)?)%\s*от\s*(?:торгового\s*)?депозита',
+            r'на\s*(\d+(?:[.,]\d+)?)%\s*от\s*депо',
+            r'маржа\s*(\d+(?:[.,]\d+)?)%',
+            r'риск\s*(\d+(?:[.,]\d+)?)%',
+            r'(\d+(?:[.,]\d+)?)%\s*депо',
+            r'(\d+(?:[.,]\d+)?)%\s*объем',
+            r'(\d+(?:[.,]\d+)?)%\s*в\s*сделку',
+            r'заходим\s*максимум\s*на\s*(\d+(?:[.,]\d+)?)%',
         ]
 
-        for pattern in margin_patterns:
-            margin_matches = re.findall(pattern, text.lower())
-            for match in margin_matches:
+        for pattern in patterns:
+            match = re.search(pattern, text_lower)
+            if match:
                 try:
-                    margin = float(match.replace(',', '.'))
-                    # Фильтруем реалистичные значения маржи (0.1% - 100%)
+                    margin = float(match.group(1).replace(',', '.'))
                     if 0.1 <= margin <= 100:
-                        logger.info(f"🔧 Found margin: {margin}%")
                         return margin
                 except:
-                    pass
+                    continue
 
         return None
 
-    def extract_direction(self, text: str) -> str:
-        """Определяет направление сделки"""
-        text_upper = text.upper()
-        if any(word in text_upper for word in ['LONG', 'ЛОНГ']):
-            return "LONG"
-        elif any(word in text_upper for word in ['SHORT', 'ШОРТ']):
-            return "SHORT"
-        else:
-            return "UNKNOWN"
-
-    def extract_symbol_improved(self, text: str) -> str:
-        """Улучшенное извлечение символа - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    def find_prices_by_context(self, text: str, context_keywords: List[str]) -> List[float]:
+        """Находит цены в контексте ключевых слов"""
+        prices = []
         lines = text.split('\n')
 
-        for line in lines:
-            line_clean = line.strip()
+        for i, line in enumerate(lines):
+            line_lower = line.lower()
 
-            # Паттерн 1: Символ с /, например ILV/USDT или OPEN/USDT
-            symbol_match = re.search(r'([A-Za-z0-9]{2,10})/[A-Za-z]{2,10}', line_clean)
-            if symbol_match:
-                symbol = symbol_match.group(1).upper()
-                logger.info(f"🔍 Found symbol with /: {symbol}")
-                return self.normalize_symbol(symbol)
+            # Проверяем наличие ключевых слов в строке (учитываем форматирование)
+            normalized_line = re.sub(r'[^\w\s:]', '', line_lower)  # Удаляем все кроме букв, цифр, пробелов и двоеточий
 
-            # Паттерн 2: #SYMBOL (самый частый)
-            symbol_match = re.search(r'#([A-Za-z0-9]{2,10})(?![a-z])', line_clean)
-            if symbol_match:
-                symbol = symbol_match.group(1).upper()
-                logger.info(f"🔍 Found symbol with #: {symbol}")
-                return self.normalize_symbol(symbol)
+            has_context = any(keyword in normalized_line for keyword in context_keywords)
 
-            # Паттерн 3: LONG/SHORT #SYMBOL
-            symbol_match = re.search(r'(?:LONG|SHORT)\s+#([A-Za-z0-9]{2,10})', line_clean, re.IGNORECASE)
-            if symbol_match:
-                symbol = symbol_match.group(1).upper()
-                logger.info(f"🔍 Found symbol with LONG/SHORT #: {symbol}")
-                return self.normalize_symbol(symbol)
+            if has_context:
+                # Извлекаем цены из этой строки
+                prices.extend(self.extract_prices_from_line(line))
 
-            # Паттерн 4: SYMBOL LONG/SHORT
-            symbol_match = re.search(r'([A-Za-z0-9]{2,10})\s+(?:LONG|SHORT)', line_clean, re.IGNORECASE)
-            if symbol_match:
-                symbol = symbol_match.group(1).upper()
-                logger.info(f"🔍 Found symbol with LONG/SHORT: {symbol}")
-                return self.normalize_symbol(symbol)
+                # Проверяем следующие строки (для вертикальных списков)
+                j = i + 1
+                while j < len(lines) and j < i + 10:
+                    next_line = lines[j].strip()
+                    if not next_line:
+                        j += 1
+                        continue
 
-            # Паттерн 5: SYMBOLUSDT
-            symbol_match = re.search(r'([A-Za-z0-9]{2,10})USDT', line_clean, re.IGNORECASE)
-            if symbol_match:
-                symbol = symbol_match.group(1).upper()
-                logger.info(f"🔍 Found symbol with USDT: {symbol}")
-                return self.normalize_symbol(symbol)
+                    # Если строка начинается с цифры или содержит только цены
+                    if (re.match(r'^\d+[.,]\d+', next_line) or
+                            len(self.extract_prices_from_line(next_line)) > 0 and
+                            len(re.findall(r'[а-яА-Яa-zA-Z]', next_line)) < 3):
+                        prices.extend(self.extract_prices_from_line(next_line))
+                        j += 1
+                    else:
+                        break
 
-            # Паттерн 6: SYMBOL/USDT
-            symbol_match = re.search(r'([A-Za-z0-9]{2,10})/USDT', line_clean, re.IGNORECASE)
-            if symbol_match:
-                symbol = symbol_match.group(1).upper()
-                logger.info(f"🔍 Found symbol with /USDT: {symbol}")
-                return self.normalize_symbol(symbol)
+        # Убираем дубликаты, сохраняя порядок
+        seen = set()
+        unique_prices = []
+        for price in prices:
+            if price not in seen:
+                seen.add(price)
+                unique_prices.append(price)
 
-        # Если символ не найден, попробуем найти любую аббревиатуру из заглавных букв
-        for line in lines:
-            line_clean = line.strip()
-            # Ищем слова из 2-6 заглавных букв/цифр
-            possible_symbols = re.findall(r'\b[A-Z0-9]{2,6}\b', line_clean)
-            for symbol in possible_symbols:
-                # Исключаем стоп-слова
-                stop_words = {'LONG', 'SHORT', 'USDT', 'BTC', 'ETH', 'TP', 'SL', 'ENTRY', 'STOP', 'LOSS', 'TAKE',
-                              'PROFIT', 'TARGET'}
-                if symbol not in stop_words and not symbol.isdigit():
-                    logger.info(f"🔍 Found possible symbol: {symbol}")
-                    return self.normalize_symbol(symbol)
+        return unique_prices
 
-        logger.warning("🔍 Symbol not found in text")
-        return "UNKNOWN"
+    def extract_prices_from_line(self, line: str) -> List[float]:
+        """Извлекает все цены из строки"""
+        prices = []
 
-    def detect_source(self, text: str, channel_source: str) -> str:
-        """Определяет источник сигнала"""
+        # Нормализуем запятые в точках
+        normalized_line = line.replace(',', '.')
+
+        # Удаляем знаки валют и другие мешающие символы
+        normalized_line = re.sub(r'[$€₽:~]', '', normalized_line)
+
+        # Ищем числа с плавающей точкой И целые числа
+        # Учитываем разные форматы: 0.1234, 0,1234 (уже заменено), 123.456, 123
+        matches = re.findall(r'\b\d+\.\d+\b|\b\d+\b', normalized_line)
+
+        for match in matches:
+            try:
+                price = float(match)
+                # Фильтруем нереалистичные цены и слишком маленькие числа (типа 10 для плеча)
+                # Исключаем 1.0, 0.8 и другие проценты, которые не являются ценами
+                if (0.000001 <= price <= 1000000 and
+                        price not in [1.0, 0.8]):  # Исключаем 1% и 0.8%
+                    prices.append(price)
+            except:
+                continue
+
+        return prices
+
+    def extract_entry_info(self, text: str, source: str) -> Tuple[List[float], List[float], bool]:
+        """Извлекает информацию о входе (цены, тип)"""
         text_lower = text.lower()
 
-        # Сначала проверяем специальные форматы
-        if 'TAKE ENTRY' in text and 'SET TP' in text and 'SET SL' in text:
-            return "WOLF_TRADING"
-        elif 'Сигналы от Артема' in text or (
-                'Открываю' in text and any(keyword in text for keyword in ['#LONG', '#SHORT', 'LONG', 'SHORT'])):
-            return "ARTEMA"
-        elif 'Nesterov Family' in text or 'нестеров' in text_lower:
-            return "NESTEROV"
-        elif 'прайват клаб' in text_lower or 'private club' in text_lower:
-            return "PRIVATE"
-        elif 'CryptoGrad' in text or 'криптоград' in text_lower:
-            return "CRYPTOGRAD"
-        # ДОБАВЛЕНО: для Хрусталева проверяем по channel_source
-        elif channel_source == "Хрусталев":
-            return "KHRUSTALEV"
-        else:
-            # Затем проверяем по ключевым словам
-            for source_name, keywords in self.sources_keywords.items():
-                for keyword in keywords:
-                    if keyword in text_lower:
-                        return source_name
-            return channel_source
-
-    def parse_signal(self, text: str, source: str) -> TradeSignal:
-        """Основной метод парсинга - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
-        logger.info(f"🔍 Parsing signal from: {source}")
-        logger.info(f"🔍 Text preview: {text[:200]}...")
-
-        # Определяем источник
-        detected_source = self.detect_source(text, source)
-        logger.info(f"🔍 Detected source: {detected_source}")
-
-        # Извлекаем символ
-        symbol = self.extract_symbol_improved(text)
-        logger.info(f"🔍 Symbol: {symbol}")
-
-        # Направление
-        direction = self.extract_direction(text)
-        logger.info(f"🔍 Direction: {direction}")
-
-        # Плечо
-        leverage = self.extract_leverage(text)
-        logger.info(f"🔍 Leverage: {leverage}")
-
-        # Маржа
-        margin = self.extract_margin(text)
-
-        # Парсим в зависимости от источника
         entry_prices = []
         limit_prices = []
-        take_profits = []
-        stop_loss = None
+        is_market = False
 
-        if detected_source == "WOLF_TRADING":
-            entry_prices, limit_prices, take_profits, stop_loss = self.parse_wolf_trading(text)
-        elif detected_source == "ARTEMA":
-            entry_prices, limit_prices, take_profits, stop_loss = self.parse_artema(text)
-        elif detected_source == "NESTOEROV":
-            entry_prices, take_profits, stop_loss = self.parse_nesterov(text)
-        elif detected_source == "PRIVATE":
-            entry_prices, take_profits, stop_loss = self.parse_private_club(text)
-        elif detected_source == "CRYPTOFUTURES":
-            entry_prices, limit_prices, take_profits, stop_loss = self.parse_cryptofutures(text)    
-        elif detected_source == "CRYPTOGRAD":
-            entry_prices, take_profits, stop_loss = self.parse_cryptograd(text)
+        # 1. Проверяем явные указания на рыночный вход
+        market_keywords = self.patterns["market"] + ["по рынку", "market", "MARKET"]
+        for keyword in market_keywords:
+            if keyword in text_lower:
+                is_market = True
+                logger.info(f"🔍 Found market keyword: {keyword}")
+                break
+
+        # 2. Обрабатываем диапазоны входа (например, 5.370-5.360)
+        for line in text.split('\n'):
+            range_match = re.search(r'(\d+[.,]\d+)\s*[-—]\s*(\d+[.,]\d+)', line)
+            if range_match:
+                try:
+                    price1 = float(range_match.group(1).replace(',', '.'))
+                    price2 = float(range_match.group(2).replace(',', '.'))
+
+                    line_lower = line.lower()
+                    if any(keyword in line_lower for keyword in self.patterns["entry"]):
+                        # Это диапазон входа, сохраняем порядок как в тексте
+                        entry_prices = [price1, price2]
+                except:
+                    continue
+
+        # 3. Если НЕ рыночный и не нашли диапазон - ищем одиночные цены
+        if not is_market and not entry_prices:
+            entry_price_candidates = self.find_prices_by_context(text, self.patterns["entry"])
+
+            # Фильтруем проценты (1.0%, 0.8% и т.д.)
+            filtered_prices = []
+            for price in entry_price_candidates:
+                # Исключаем проценты (обычно 1.0, 0.8 и т.д.)
+                if price not in [1.0, 0.8, 2.0, 3.0, 5.0, 10.0, 20.0, 30.0, 50.0]:
+                    filtered_prices.append(price)
+
+            if filtered_prices:
+                entry_prices = filtered_prices
+
+        logger.info(f"🔍 Entry detection - is_market: {is_market}, entry_prices: {entry_prices}")
+        return entry_prices, limit_prices, is_market
+
+    def extract_take_profits(self, text: str, direction: str, entry_price: Optional[float]) -> List[float]:
+        """Извлекает тейк-профиты"""
+        # Сначала ищем по контексту
+        tp_candidates = self.find_prices_by_context(text, self.patterns["take_profit"])
+
+        # Если не нашли, ищем любые цены после ключевых слов
+        if not tp_candidates:
+            lines = text.split('\n')
+            in_tp_section = False
+
+            for line in lines:
+                line_lower = line.lower()
+
+                # Входим в секцию тейк-профитов
+                if any(keyword in line_lower for keyword in self.patterns["take_profit"]):
+                    in_tp_section = True
+
+                # Если в секции тейк-профитов
+                if in_tp_section:
+                    prices = self.extract_prices_from_line(line)
+                    if prices:
+                        tp_candidates.extend(prices)
+
+                    # Выходим из секции, если нашли другую ключевую секцию
+                    if any(keyword in line_lower for keyword in self.patterns["stop_loss"] + self.patterns["entry"]):
+                        in_tp_section = False
+
+        # Фильтруем по направлению
+        filtered_tps = []
+        if direction == "LONG" and entry_price is not None:
+            filtered_tps = [tp for tp in tp_candidates if tp > entry_price]
+        elif direction == "SHORT" and entry_price is not None:
+            filtered_tps = [tp for tp in tp_candidates if tp < entry_price]
         else:
-            # Универсальный парсер для неизвестных форматов
-            all_prices = self.extract_all_numbers(text)
-            if all_prices:
-                if len(all_prices) >= 3:
-                    entry_prices = [all_prices[0]]
-                    # ФИЛЬТРУЕМ тейк-профиты по направлению
-                    potential_tps = all_prices[1:-1]
-                    if direction == "LONG":
-                        take_profits = [tp for tp in potential_tps if tp > entry_prices[0]]
-                    elif direction == "SHORT":
-                        take_profits = [tp for tp in potential_tps if tp < entry_prices[0]]
-                    else:
-                        take_profits = potential_tps
-                    stop_loss = all_prices[-1]
-                elif len(all_prices) == 2:
-                    entry_prices = [all_prices[0]]
-                    take_profits = [all_prices[1]]
-                elif len(all_prices) == 1:
-                    entry_prices = [all_prices[0]]
-                logger.info(f"🔍 Universal parser found: Entries: {entry_prices}, TPs: {take_profits}, SL: {stop_loss}")
+            filtered_tps = tp_candidates
 
-        # Если не нашли цены, пробуем найти любые числа в тексте
-        if not entry_prices and not take_profits:
-            all_numbers = self.extract_all_numbers(text)
-            if all_numbers:
-                entry_prices = [all_numbers[0]]
-                if len(all_numbers) > 1:
-                    take_profits = all_numbers[1:]
-                logger.info(f"🔍 Fallback parser found: Entries: {entry_prices}, TPs: {take_profits}")
+        # Для SHORT сортируем по убыванию, для LONG по возрастанию
+        if direction == "SHORT":
+            filtered_tps.sort(reverse=True)
+        elif direction == "LONG":
+            filtered_tps.sort()
 
-        # 🔥 ВАЖНОЕ ИСПРАВЛЕНИЕ: Фильтруем тейк-профиты по направлению
-        if entry_prices and take_profits:
-            entry_price = entry_prices[0]
-            if direction == "LONG":
-                # Для LONG: тейк-профиты должны быть ВЫШЕ цены входа
-                filtered_tps = [tp for tp in take_profits if tp > entry_price]
-                if len(filtered_tps) != len(take_profits):
-                    logger.info(
-                        f"🔍 Filtered TPs for LONG: removed {len(take_profits) - len(filtered_tps)} TPs below entry")
-                    take_profits = filtered_tps
-            elif direction == "SHORT":
-                # Для SHORT: тейк-профиты должны быть НИЖЕ цены входа
-                filtered_tps = [tp for tp in take_profits if tp < entry_price]
-                if len(filtered_tps) != len(take_profits):
-                    logger.info(
-                        f"🔍 Filtered TPs for SHORT: removed {len(take_profits) - len(filtered_tps)} TPs above entry")
-                    take_profits = filtered_tps
+        return filtered_tps
 
-        logger.info(f"🔍 Final result - Symbol: {symbol}, Direction: {direction}, " +
-                    f"Entries: {entry_prices}, Limits: {limit_prices}, TPs: {take_profits}, SL: {stop_loss}")
+    def extract_stop_loss(self, text: str) -> Optional[float]:
+        """Извлекает стоп-лосс"""
+        # Ищем по контексту
+        sl_candidates = self.find_prices_by_context(text, self.patterns["stop_loss"])
+
+        if sl_candidates:
+            return sl_candidates[0]
+
+        # Дополнительный поиск
+        for line in text.split('\n'):
+            line_lower = line.lower()
+            if any(keyword in line_lower for keyword in self.patterns["stop_loss"]):
+                prices = self.extract_prices_from_line(line)
+                if prices:
+                    # Исключаем проценты
+                    for price in prices:
+                        if price not in [0.8, 1.0, 2.0, 3.0, 5.0]:
+                            return price
+
+        return None
+
+    def parse_signal(self, text: str, source: str) -> TradeSignal:
+        """Основной метод парсинга"""
+        logger.info(f"🔍 Parsing signal from: {source}")
+
+        # Нормализуем текст
+        normalized_text = self.normalize_text(text)
+
+        # Определяем источник
+        detected_source = self.detect_source(normalized_text, source)
+        logger.info(f"🔍 Detected source: {detected_source}")
+
+        # Извлекаем данные
+        symbol = self.extract_symbol(normalized_text)
+        direction = self.extract_direction(normalized_text)
+        leverage = self.extract_leverage(normalized_text)
+        margin = self.extract_margin(normalized_text)
+
+        logger.info(f"🔍 Symbol: {symbol}")
+        logger.info(f"🔍 Direction: {direction}")
+        logger.info(f"🔍 Leverage: {leverage}")
+        if margin:
+            logger.info(f"🔍 Margin: {margin}%")
+
+        # Извлекаем информацию о входе
+        entry_prices, limit_prices, is_market = self.extract_entry_info(normalized_text, detected_source)
+
+        if is_market:
+            logger.info("🔍 Market order detected")
+
+        # Определяем базовую цену для фильтрации
+        base_price = None
+        if entry_prices:
+            base_price = entry_prices[0] if entry_prices else None
+        elif limit_prices:
+            base_price = limit_prices[0] if limit_prices else None
+
+        # Извлекаем тейк-профиты
+        take_profits = self.extract_take_profits(normalized_text, direction, base_price)
+
+        # Извлекаем стоп-лосс
+        stop_loss = self.extract_stop_loss(normalized_text)
+
+        logger.info(f"🔍 Entry prices: {entry_prices}")
+        logger.info(f"🔍 Limit prices: {limit_prices}")
+        logger.info(f"🔍 Take profits: {take_profits}")
+        logger.info(f"🔍 Stop loss: {stop_loss}")
 
         return TradeSignal(
             symbol=symbol,
@@ -889,9 +558,48 @@ class AdvancedSignalParser:
             leverage=leverage,
             margin=margin,
             source=detected_source,
-            timestamp=time.time()
+            timestamp=time.time(),
+            is_market=is_market
         )
+
+    def is_preliminary_announcement(self, text: str) -> bool:
+        """Определяет, является ли сообщение предварительным объявлением"""
+        text_lower = text.lower()
+
+        preliminary_keywords = [
+            'готовься', 'приготовь', 'скоро', 'будет', 'следи',
+            'внимание', 'объявляю', 'анонс', 'предупреждение',
+            'жду', 'ожидай', 'следующ', 'готовьтесь', 'вскоре',
+            'на подходе', 'готовьте', 'следите', 'скоро выложу',
+            'ожидайте', 'внимание!', 'вскоре будет'
+        ]
+
+        has_preliminary = any(keyword in text_lower for keyword in preliminary_keywords)
+
+        if has_preliminary:
+            # Считаем количество конкретных торговых данных
+            trading_data_count = 0
+
+            if re.search(r'\d+[.,]\d+', text_lower):
+                trading_data_count += 1
+
+            if any(keyword in text_lower for keyword in self.patterns["entry"]):
+                trading_data_count += 1
+
+            if any(keyword in text_lower for keyword in self.patterns["take_profit"]):
+                trading_data_count += 1
+
+            if any(keyword in text_lower for keyword in self.patterns["stop_loss"]):
+                trading_data_count += 1
+
+            if trading_data_count < 2:
+                return True
+
+        return False
 
 
 # ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР
-advanced_parser = AdvancedSignalParser()
+universal_parser = UniversalSignalParser()
+
+# Для совместимости с существующим кодом
+advanced_parser = universal_parser

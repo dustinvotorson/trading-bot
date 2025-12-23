@@ -12,27 +12,13 @@ import os
 import re
 from config_telethon import get_channel_source
 import sys
-import asyncio
 from telethon.errors import TypeNotFoundError
+from typing import Dict, Optional, Set, Any
+from dataclasses import dataclass, field
+from functools import wraps
 
-
-# Обработчик для перехвата ошибок Telethon
-def handle_telethon_error():
-    """Обработчик для игнорирования ошибок TypeNotFoundError"""
-    loop = asyncio.get_event_loop()
-
-    def exception_handler(loop, context):
-        exception = context.get('exception')
-        if isinstance(exception, TypeNotFoundError):
-            logger.error(f"⚠️  Telethon TypeNotFoundError: {exception}")
-            logger.info("🔄 Игнорируем ошибку и продолжаем работу...")
-            return  # Игнорируем ошибку
-
-        # Для других ошибок - стандартная обработка
-        loop.default_exception_handler(context)
-
-    loop.set_exception_handler(exception_handler)
-# MONITORED_CHANNELS = [-1002972873621]
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Получаем глобальный экземпляр trading_data
@@ -54,6 +40,102 @@ except ImportError:
             self.url = url
 
 
+@dataclass
+class UserState:
+    """Класс для хранения состояния пользователя"""
+    waiting_for_signal: bool = False
+    signal_data: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PriceCacheEntry:
+    """Запись в кэше цен"""
+    price: float
+    timestamp: float
+    exchange: str
+
+
+class PriceCache:
+    """Кэш цен для оптимизации запросов к биржам"""
+
+    def __init__(self, ttl: int = 5):
+        self.cache: Dict[str, PriceCacheEntry] = {}
+        self.ttl = ttl  # время жизни кэша в секундах
+
+    async def get_price(self, symbol: str) -> tuple[Optional[float], Optional[str]]:
+        """Получает цену из кэша или от биржи"""
+        current_time = time.time()
+
+        # Проверяем кэш
+        if symbol in self.cache:
+            entry = self.cache[symbol]
+            if current_time - entry.timestamp < self.ttl:
+                return entry.price, entry.exchange
+
+        # Получаем свежую цену
+        try:
+            price, exchange = await multi_exchange.get_current_price(symbol)
+            if price:
+                self.cache[symbol] = PriceCacheEntry(
+                    price=price,
+                    timestamp=current_time,
+                    exchange=exchange
+                )
+            return price, exchange
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения цены для {symbol}: {e}")
+            return None, None
+
+    def clear_old_entries(self):
+        """Очищает старые записи в кэше"""
+        current_time = time.time()
+        to_delete = []
+
+        for symbol, entry in self.cache.items():
+            if current_time - entry.timestamp > self.ttl * 2:
+                to_delete.append(symbol)
+
+        for symbol in to_delete:
+            del self.cache[symbol]
+
+
+def admin_only(func):
+    """Декоратор для проверки прав администратора"""
+
+    @wraps(func)
+    async def wrapper(self, event, *args, **kwargs):
+        # Проверяем, что это личное сообщение
+        if not event.is_private:
+            await event.answer("❌ Эта команда доступна только в личных сообщениях")
+            return
+
+        # Проверяем права администратора
+        if not is_admin(event.sender_id):
+            await event.reply("❌ Эта команда только для администраторов")
+            return
+
+        # Проверяем доступ к боту
+        if not is_whitelisted(event.sender_id):
+            await event.reply("❌ Доступ запрещен")
+            return
+
+        return await func(self, event, *args, **kwargs)
+
+    return wrapper
+
+
+def private_only(func):
+    """Декоратор для ограничения команд только личными сообщениями"""
+
+    @wraps(func)
+    async def wrapper(self, event, *args, **kwargs):
+        if not event.is_private:
+            return
+        return await func(self, event, *args, **kwargs)
+
+    return wrapper
+
+
 class TelethonTradingBot:
     def __init__(self):
         """
@@ -62,7 +144,8 @@ class TelethonTradingBot:
         - прокси берём из proxy_settings.MT_PROXIES (random.choice). Если прокси нет — используем None (прямое подключение).
         - proxy приводим к формату, который Telethon ожидает.
         """
-        handle_telethon_error()
+        self._setup_telethon_error_handler()
+
         # 1) Получаем имя сессии (файл сессии Telethon)
         try:
             from config_telethon import SESSION_NAME as CONFIG_SESSION_NAME
@@ -100,16 +183,68 @@ class TelethonTradingBot:
 
         proxy_arg = build_proxy_arg(raw_proxy)
 
-        # 3) Создаём клиента Telethon (используем session имя и proxy_arg)
-        #    (API_ID и API_HASH импортированы сверху из config_telethon)
+        # 3) Создаём клиента Telethon
         self.client = TelegramClient(session, API_ID, API_HASH, proxy=proxy_arg)
 
         # 4) Обычные поля класса
-        self.active_signals = {}
-        self.partial_signals = {}  # Кеш для неполных сигналов
-        self.partial_khrustalev_signals = {}  # Кеш для сигналов Хрусталева
+        self.active_signals: Dict[str, Any] = {}
+        self.partial_signals: Dict[str, Any] = {}  # Кеш для неполных сигналов
+        self.partial_khrustalev_signals: Dict[str, Any] = {}  # Кеш для сигналов Хрусталева
+        self.user_states: Dict[int, UserState] = {}  # Состояния пользователей
+        self.price_cache = PriceCache(ttl=5)  # Кэш цен
+
+        # Конфигурация
         self.partial_signals_ttl = 300  # 5 минут TTL для неполных сигналов
         self.khrustalev_timeout = 180  # 3 минуты для объединения сигналов Хрусталева
+        self.max_active_signals = 50  # Максимальное количество активных сигналов
+
+        # Запускаем фоновые задачи
+        asyncio.create_task(self._cleanup_tasks())
+
+    def _setup_telethon_error_handler(self):
+        """Настраивает обработчик ошибок Telethon"""
+        try:
+            loop = asyncio.get_event_loop()
+
+            def exception_handler(loop, context):
+                exception = context.get('exception')
+                if isinstance(exception, TypeNotFoundError):
+                    logger.warning(f"⚠️  Telethon TypeNotFoundError: {exception}")
+                    logger.info("🔄 Игнорируем ошибку и продолжаем работу...")
+                    return
+
+                # Для других ошибок - стандартная обработка
+                if loop.default_exception_handler:
+                    loop.default_exception_handler(context)
+
+            loop.set_exception_handler(exception_handler)
+        except Exception as e:
+            logger.error(f"❌ Ошибка настройки обработчика ошибок: {e}")
+
+    async def _cleanup_tasks(self):
+        """Фоновая задача для очистки старых данных"""
+        while True:
+            try:
+                # Очищаем старые кэшированные цены
+                self.price_cache.clear_old_entries()
+
+                # Очищаем устаревшие частичные сигналы Хрусталева
+                await self.clean_old_khrustalev_signals()
+
+                # Очищаем устаревшие состояния пользователей (старше 1 часа)
+                current_time = time.time()
+                users_to_remove = []
+                for user_id, state in self.user_states.items():
+                    if hasattr(state, 'last_activity') and current_time - state.last_activity > 3600:
+                        users_to_remove.append(user_id)
+
+                for user_id in users_to_remove:
+                    del self.user_states[user_id]
+
+                await asyncio.sleep(60)  # Запускаем каждую минуту
+            except Exception as e:
+                logger.error(f"❌ Ошибка в задаче очистки: {e}")
+                await asyncio.sleep(60)
 
     async def handle_channel_message(self, event):
         """Обрабатывает сообщения из каналов с фильтрацией предварительных объявлений"""
@@ -128,6 +263,11 @@ class TelethonTradingBot:
             # Для Хрусталева используем специальный обработчик
             if "khrustalev" in channel_name.lower():
                 await self.handle_khrustalev_message(message_text, channel_name, event)
+                return
+
+            # Проверяем лимит активных сигналов
+            if len(self.active_signals) >= self.max_active_signals:
+                logger.warning(f"⚠️  Достигнут лимит активных сигналов ({self.max_active_signals})")
                 return
 
             # Парсим сигнал
@@ -159,7 +299,7 @@ class TelethonTradingBot:
                 signal.is_market = True  # Устанавливаем флаг
 
                 # Получаем текущую цену
-                current_price, exchange_used = await multi_exchange.get_current_price(signal.symbol)
+                current_price, exchange_used = await self.price_cache.get_price(signal.symbol)
                 if current_price:
                     signal.entry_prices = [current_price]
                     logger.info(
@@ -170,7 +310,7 @@ class TelethonTradingBot:
 
                     # Пробуем альтернативный формат (например, BCH вместо BCHUSDT)
                     alt_symbol = signal.symbol.replace("USDT", "")
-                    current_price, exchange_used = await multi_exchange.get_current_price(alt_symbol)
+                    current_price, exchange_used = await self.price_cache.get_price(alt_symbol)
                     if current_price:
                         signal.entry_prices = [current_price]
                         logger.info(f"💰 Рыночный вход - альтернативная цена {alt_symbol}: {current_price}")
@@ -249,10 +389,7 @@ class TelethonTradingBot:
             logger.info(f"🔕 Пропускаем - нет тейк-профитов (вероятно предварительное объявление)")
             return False
 
-        # 4. ВСЕ СИГНАЛЫ БЕЗ ЦЕНЫ ВХОДА СЧИТАЕМ РЫНОЧНЫМИ - НЕ ПРОПУСКАЕМ!
-        # Только если нет тейк-профитов - пропускаем (предварительное объявление)
-
-        # 5. Проверяем конкретные данные в сообщении
+        # 4. Проверяем конкретные данные в сообщении
         has_concrete_data = self.has_concrete_trading_data(message_text)
         if not has_concrete_data:
             logger.info(f"🔕 Пропускаем - нет конкретных торговых данных")
@@ -335,6 +472,11 @@ class TelethonTradingBot:
 
                     # Объединяем сигналы
                     merged_signal = self.merge_khrustalev_signals(first_signal, signal)
+
+                    # Проверяем лимит активных сигналов
+                    if len(self.active_signals) >= self.max_active_signals:
+                        logger.warning(f"⚠️  Достигнут лимит активных сигналов, пропускаем {merged_signal.symbol}")
+                        return
 
                     # Создаем финальный сигнал
                     final_signal_id = f"{merged_signal.symbol}_{int(time.time())}"
@@ -421,14 +563,7 @@ class TelethonTradingBot:
 
         return merged
 
-    async def clean_partial_signal(self, signal_id: str):
-        """Очищает частичный сигнал по истечении TTL"""
-        await asyncio.sleep(self.partial_signals_ttl)
-        if signal_id in self.partial_signals:
-            del self.partial_signals[signal_id]
-            logger.info(f"🧹 Удален устаревший частичный сигнал: {signal_id}")
-
-    async def check_access(self, event):
+    async def check_access(self, event) -> bool:
         """Проверяет доступ пользователя - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         # Проверяем, что это личное сообщение, а не из канала
         if not event.is_private:
@@ -482,12 +617,9 @@ class TelethonTradingBot:
         else:
             return Button.url(text, url)
 
+    @private_only
     async def handle_start_command(self, event):
         """Обработчик команды /start - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
-        # Проверяем, что это личное сообщение
-        if not event.is_private:
-            return
-
         if not await self.check_access(event):
             return
 
@@ -538,41 +670,157 @@ class TelethonTradingBot:
 
         await event.reply(welcome_text, buttons=buttons, link_preview=False)
 
+    @private_only
     async def handle_callback_query(self, event):
         """Обработчик нажатий на inline кнопки - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
-        if not event.is_private:
-            await event.answer()  # Просто отвечаем, но ничего не делаем
-            return
-
         if not await self.check_access(event):
+            await event.answer("❌ Доступ запрещен")
             return
 
         data = event.data.decode('utf-8') if event.data else ''
 
         try:
             if data == "stats":
-                await self.handle_stats_command(event)
+                await self._send_stats_response(event)
             elif data == "active":
-                await self.handle_active_command(event)
+                await self._send_active_response(event)
             elif data == "help":
-                await self.handle_help_command(event)
+                await self._send_help_response(event)
             elif data == "admin":
-                await self.handle_admin_command(event)
+                if is_admin(event.sender_id):
+                    await self._send_admin_response(event)
+                else:
+                    await event.answer("❌ Доступ запрещен", alert=True)
+            else:
+                await event.answer(f"❌ Неизвестная команда: {data}")
 
             # Подтверждаем нажатие кнопки
             await event.answer()
+
         except Exception as e:
             logger.error(f"❌ Ошибка обработки callback: {e}")
             await event.answer("❌ Произошла ошибка", alert=True)
 
-    async def handle_admin_command(self, event):
-        """Обработчик команды /admin"""
-        if not event.is_private:
-            return
-        if not is_admin(event.sender_id):
-            await event.reply("❌ Эта команда только для администраторов")
+    async def _send_stats_response(self, event):
+        """Отправляет статистику в ответ на callback"""
+        if not self.active_signals:
+            await event.respond("📊 **Статистика**\n\nАктивных сделок нет")
             return
 
+        stats_text = "📊 **Статистика сделок**\n\n"
+        total_pnl = 0
+        signals_with_pnl = 0
+
+        for signal_id, signal in list(self.active_signals.items())[:5]:
+            symbol_data = trading_data.get_symbol_data(signal.symbol)
+            if symbol_data and 'pnl_percent' in symbol_data:
+                pnl = symbol_data['pnl_percent']
+                total_pnl += pnl
+                signals_with_pnl += 1
+
+                direction_emoji = "🟢" if signal.direction == "LONG" else "🔴"
+                pnl_emoji = "📈" if pnl > 0 else "📉"
+
+                stats_text += f"{direction_emoji} **{signal.symbol}** {signal.direction}\n"
+                stats_text += f"   {pnl_emoji} PnL: {pnl:+.2f}%\n"
+                stats_text += f"   🎯 Тейков: {len(signal.take_profits)}\n"
+                stats_text += f"   📍 Источник: {signal.source}\n\n"
+
+        if signals_with_pnl > 0:
+            avg_pnl = total_pnl / signals_with_pnl
+            stats_text += f"**Общая статистика:**\n"
+            stats_text += f"• Активных сделок: {len(self.active_signals)}\n"
+            stats_text += f"• Средний PnL: {avg_pnl:+.2f}%\n"
+
+        await event.respond(stats_text)
+
+    async def _send_active_response(self, event):
+        """Отправляет активные сделки в ответ на callback"""
+        if not self.active_signals:
+            await event.respond("🔄 **Активные сделки**\n\nНет активных сделок")
+            return
+
+        active_text = "🔄 **Активные сделки**\n\n"
+
+        for signal_id, signal in list(self.active_signals.items())[:5]:
+            symbol_data = trading_data.get_symbol_data(signal.symbol)
+            current_price = symbol_data.get('current_price', 'N/A') if symbol_data else 'N/A'
+            pnl = symbol_data.get('pnl_percent', 0) if symbol_data else 0
+
+            direction_emoji = "🟢" if signal.direction == "LONG" else "🔴"
+            pnl_emoji = "📈" if pnl > 0 else "📉"
+
+            active_text += f"{direction_emoji} **{signal.symbol}** {signal.direction}\n"
+            active_text += f"   💰 Цена: {current_price}\n"
+            active_text += f"   {pnl_emoji} PnL: {pnl:+.2f}%\n"
+            active_text += f"   🎯 Тейков: {len(signal.take_profits)}\n\n"
+
+        if len(self.active_signals) > 5:
+            active_text += f"*... и еще {len(self.active_signals) - 5} сделок*"
+
+        await event.respond(active_text)
+
+    async def _send_help_response(self, event):
+        """Отправляет справку в ответ на callback"""
+        help_text = """
+❓ **Помощь по Trading Bot**
+
+**Основные команды:**
+/start - Главное меню
+/dashboard - Открыть веб-интерфейс  
+/stats - Статистика сделок
+/active - Активные сделки
+        """
+
+        # Добавляем админские команды если пользователь админ
+        if is_admin(event.sender_id):
+            help_text += "\n\n**👑 Админ команды:**\n"
+            help_text += "/admin - Админ панель\n"
+            help_text += "/adminhelp - Подробная справка по админ-командам\n"
+            help_text += "/adduser <id> - Добавить пользователя\n"
+            help_text += "/removeuser <id> - Удалить пользователя\n"
+            help_text += "/listusers - Список пользователей\n"
+            help_text += "/editsignal - Редактировать сделку\n"
+            help_text += "/addsignal - Добавить сделку вручную\n"
+            help_text += "/activesignals - Список сделок с ID\n"
+
+        await event.respond(help_text)
+
+    async def _send_admin_response(self, event):
+        """Отправляет админ панель в ответ на callback"""
+        admin_text = f"""
+👑 **Админ панель**
+
+**Статистика пользователей:**
+• Админы: {len(ADMINS)}
+• Белый список: {len(WHITELIST)}
+• Активных сделок: {len(self.active_signals)}
+
+**👥 Управление пользователями:**
+`/adduser <user_id>` - Добавить пользователя
+`/removeuser <user_id>` - Удалить пользователя  
+`/listusers` - Список пользователей
+
+**📊 Управление сделками:**
+`/editsignal <signal_id> <param> <value>` - Редактировать сделку
+`/addsignal` - Добавить сделку вручную
+`/activesignals` - Список сделок с ID
+
+**🛠 Другие команды:**
+`/adminhelp` - Подробная справка по командам
+
+**📝 Примеры:**
+`/adduser 123456789`
+`/editsignal BTCUSDT_123456 stop_loss 50000`
+`/editsignal BTCUSDT_123456 take_profits [51000,52000,53000]`
+`/addsignal` - и следуйте инструкциям
+        """
+
+        await event.respond(admin_text)
+
+    @admin_only
+    async def handle_admin_command(self, event):
+        """Обработчик команды /admin"""
         admin_text = f"""
 👑 **Админ панель**
 
@@ -603,14 +851,9 @@ class TelethonTradingBot:
 
         await event.reply(admin_text)
 
+    @admin_only
     async def handle_add_user_command(self, event):
         """Добавление пользователя в белый список"""
-        if not event.is_private:
-            return
-        if not is_admin(event.sender_id):
-            await event.reply("❌ Эта команда только для администраторов")
-            return
-
         args = event.message.text.split()
         if len(args) != 2:
             await event.reply("❌ Использование: /adduser <user_id>")
@@ -623,12 +866,9 @@ class TelethonTradingBot:
         except ValueError:
             await event.reply("❌ user_id должен быть числом")
 
+    @admin_only
     async def handle_remove_user_command(self, event):
         """Удаление пользователя из белого списка"""
-        if not is_admin(event.sender_id):
-            await event.reply("❌ Эта команда только для администраторов")
-            return
-
         args = event.message.text.split()
         if len(args) != 2:
             await event.reply("❌ Использование: /removeuser <user_id>")
@@ -641,14 +881,9 @@ class TelethonTradingBot:
         except ValueError:
             await event.reply("❌ user_id должен быть числом")
 
+    @admin_only
     async def handle_list_users_command(self, event):
         """Показать список пользователей"""
-        if not event.is_private:
-            return
-        if not is_admin(event.sender_id):
-            await event.reply("❌ Эта команда только для администраторов")
-            return
-
         users_text = "👥 **Список пользователей**\n\n"
         users_text += f"**Админы ({len(ADMINS)}):**\n"
         for admin_id in ADMINS:
@@ -660,14 +895,9 @@ class TelethonTradingBot:
 
         await event.reply(users_text)
 
+    @admin_only
     async def handle_edit_signal_command(self, event):
         """Редактирование параметров сделки"""
-        if not event.is_private:
-            return
-        if not is_admin(event.sender_id):
-            await event.reply("❌ Эта команда только для администраторов")
-            return
-
         args = event.message.text.split()
         if len(args) < 4:
             await event.reply(
@@ -721,14 +951,9 @@ class TelethonTradingBot:
         except Exception as e:
             await event.reply(f"❌ Ошибка: {e}")
 
+    @admin_only
     async def handle_admin_help_command(self, event):
         """Обработчик команды /adminhelp - расширенная помощь для админов"""
-        if not event.is_private:
-            return
-        if not is_admin(event.sender_id):
-            await event.reply("❌ Эта команда только для администраторов")
-            return
-
         help_text = """
 👑 **АДМИН КОМАНДЫ - Полный список**
 
@@ -767,17 +992,14 @@ class TelethonTradingBot:
 
         await event.reply(help_text)
 
+    @admin_only
     async def handle_add_signal_command(self, event):
         """Обработчик команды /addsignal - ручное добавление сделки"""
-        if not event.is_private:
-            return
-        if not is_admin(event.sender_id):
-            await event.reply("❌ Эта команда только для администраторов")
-            return
+        # Устанавливаем состояние ожидания данных
+        if event.sender_id not in self.user_states:
+            self.user_states[event.sender_id] = UserState()
 
-        # Создаем атрибут состояния для пользователя, если его нет
-        if not hasattr(event, '_client') or not hasattr(event, 'add_signal_state'):
-            event.add_signal_state = True
+        self.user_states[event.sender_id].waiting_for_signal = True
 
         instruction_text = """
 📝 **ДОБАВЛЕНИЕ СДЕЛКИ ВРУЧНУЮ**
@@ -818,12 +1040,38 @@ class TelethonTradingBot:
                 await event.reply("❌ Недостаточно данных. Нужно минимум 5 параметров.")
                 return
 
+            # Проверяем лимит активных сигналов
+            if len(self.active_signals) >= self.max_active_signals:
+                await event.reply(f"❌ Достигнут лимит активных сигналов ({self.max_active_signals})")
+                return
+
             # Парсим обязательные параметры
             symbol = parts[0].upper()
             direction = parts[1].upper()
+
+            # Проверяем направление
+            if direction not in ["LONG", "SHORT"]:
+                await event.reply("❌ Направление должно быть LONG или SHORT")
+                return
+
             entry_price = float(parts[2])
             stop_loss = float(parts[3])
             take_profits = [float(tp.strip()) for tp in parts[4].split(',')]
+
+            # Проверяем цены
+            if entry_price <= 0 or stop_loss <= 0:
+                await event.reply("❌ Цены должны быть положительными числами")
+                return
+
+            # Проверяем тейк-профиты
+            if not take_profits:
+                await event.reply("❌ Должен быть хотя бы один тейк-профит")
+                return
+
+            for tp in take_profits:
+                if tp <= 0:
+                    await event.reply("❌ Тейк-профиты должны быть положительными числами")
+                    return
 
             # Парсим опциональные параметры
             leverage = 1
@@ -832,10 +1080,24 @@ class TelethonTradingBot:
 
             if len(parts) > 5:
                 leverage = float(parts[5])
+                if leverage <= 0:
+                    await event.reply("❌ Плечо должно быть положительным числом")
+                    return
+
             if len(parts) > 6:
                 margin = float(parts[6])
+                if margin < 0:
+                    await event.reply("❌ Маржа не может быть отрицательной")
+                    return
+
             if len(parts) > 7:
                 source = ' '.join(parts[7:])
+
+            # Проверяем валидность символа (опционально, если есть функция проверки)
+            # if hasattr(multi_exchange, 'validate_symbol'):
+            #     if not await multi_exchange.validate_symbol(symbol):
+            #         await event.reply(f"❌ Символ {symbol} не найден на поддерживаемых биржах")
+            #         return
 
             # Создаем сигнал
             signal = advanced_parser.TradeSignal()
@@ -865,6 +1127,25 @@ class TelethonTradingBot:
             logger.info(f"   Маржа: {signal.margin}")
             logger.info(f"   Источник: {signal.source}")
 
+            # Сохраняем в trading_data
+            signal_data = {
+                'signal_id': signal_id,
+                'symbol': signal.symbol,
+                'direction': signal.direction,
+                'entry_prices': signal.entry_prices,
+                'take_profits': signal.take_profits,
+                'stop_loss': signal.stop_loss,
+                'leverage': signal.leverage,
+                'margin': signal.margin,
+                'source': signal.source,
+                'pnl_percent': 0,
+                'reached_tps': [],
+                'exchange': 'Unknown',
+                'timestamp': signal.timestamp,
+                'is_market': False
+            }
+            trading_data.update_signal_data(signal_data)
+
             # Запускаем мониторинг
             asyncio.create_task(self.monitor_signal(signal_id))
 
@@ -891,15 +1172,14 @@ class TelethonTradingBot:
             await event.reply(f"❌ Ошибка формата чисел: {e}\nПроверьте, что все числовые значения введены правильно.")
         except Exception as e:
             await event.reply(f"❌ Ошибка при добавлении сделки: {e}")
+        finally:
+            # Сбрасываем состояние пользователя
+            if event.sender_id in self.user_states:
+                self.user_states[event.sender_id].waiting_for_signal = False
 
+    @admin_only
     async def handle_active_signals_command(self, event):
         """Показывает активные сделки с их ID для редактирования"""
-        if not event.is_private:
-            return
-        if not is_admin(event.sender_id):
-            await event.reply("❌ Эта команда только для администраторов")
-            return
-
         if not self.active_signals:
             await event.reply("🔍 **Активные сделки**\n\nНет активных сделок")
             return
@@ -937,7 +1217,7 @@ class TelethonTradingBot:
         signal = self.active_signals[signal_id]
 
         # Получаем текущую цену для расчета PnL
-        current_price, exchange_used = await multi_exchange.get_current_price(signal.symbol)
+        current_price, exchange_used = await self.price_cache.get_price(signal.symbol)
 
         if current_price and signal.entry_prices:
             entry_price = signal.entry_prices[0]
@@ -973,11 +1253,9 @@ class TelethonTradingBot:
             }
             trading_data.update_signal_data(signal_data)
 
+    @private_only
     async def handle_dashboard_command(self, event):
         """Обработчик команды /dashboard - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
-        if not event.is_private:
-            return
-
         if not await self.check_access(event):
             return
 
@@ -988,11 +1266,9 @@ class TelethonTradingBot:
             buttons=button
         )
 
+    @private_only
     async def handle_stats_command(self, event):
         """Обработчик команды /stats - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
-        if not event.is_private:
-            return
-
         if not await self.check_access(event):
             return
 
@@ -1031,11 +1307,9 @@ class TelethonTradingBot:
         button = self.create_web_app_button("📊 Детальная статистика", WEB_APP_URL)
         await event.reply(stats_text, buttons=button)
 
+    @private_only
     async def handle_active_command(self, event):
         """Обработчик команды /active - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
-        if not event.is_private:
-            return
-
         if not await self.check_access(event):
             return
 
@@ -1064,34 +1338,32 @@ class TelethonTradingBot:
         button = self.create_web_app_button("📊 Все сделки в деталях", WEB_APP_URL)
         await event.reply(active_text, buttons=button)
 
+    @private_only
     async def handle_text_messages(self, event):
         """Обработчик текстовых сообщений (кнопки)"""
-        if not event.is_private:
-            return
         if not await self.check_access(event):
             return
 
         # Проверяем, находится ли пользователь в процессе добавления сделки
-        if hasattr(event, 'add_signal_state') and event.add_signal_state:
+        if event.sender_id in self.user_states and self.user_states[event.sender_id].waiting_for_signal:
             await self.process_add_signal_steps(event)
             return
 
-        if event.raw_text == "📊 Dashboard":
+        text = event.raw_text
+        if text == "📊 Dashboard":
             await self.handle_dashboard_command(event)
-        elif event.raw_text == "📈 Статистика":
+        elif text == "📈 Статистика":
             await self.handle_stats_command(event)
-        elif event.raw_text == "🔄 Активные сделки":
+        elif text == "🔄 Активные сделки":
             await self.handle_active_command(event)
-        elif event.raw_text == "❓ Помощь":
+        elif text == "❓ Помощь":
             await self.handle_help_command(event)
-        elif event.raw_text == "👑 Админ панель":
+        elif text == "👑 Админ панель" and is_admin(event.sender_id):
             await self.handle_admin_command(event)
 
+    @private_only
     async def handle_help_command(self, event):
         """Обработчик команды помощи - ТОЛЬКО ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ"""
-        if not event.is_private:
-            return
-
         if not await self.check_access(event):
             return
 
@@ -1125,101 +1397,128 @@ class TelethonTradingBot:
             return
 
         signal = self.active_signals[signal_id]
-        reached_tps = set()
+        reached_tps: Set[int] = set()
         error_count = 0
         entry_executed = True  # Для рыночных входов сразу выполнено
+        max_errors = 5  # Максимальное количество ошибок подряд
 
         logger.info(f"🔍 Начинаем мониторинг {signal.symbol} {signal.direction}")
 
         try:
-            while signal_id in self.active_signals and error_count < 5:
-                current_price, exchange_used = await multi_exchange.get_current_price(signal.symbol)
+            while signal_id in self.active_signals and error_count < max_errors:
+                try:
+                    current_price, exchange_used = await self.price_cache.get_price(signal.symbol)
 
-                # Если не удалось получить цену
-                if current_price is None:
-                    error_count += 1
-                    if error_count >= 3:
-                        logger.error(f"❌ Прекращаем мониторинг {signal.symbol} - символ не найден на биржах")
-                        del self.active_signals[signal_id]
+                    # Если не удалось получить цену
+                    if current_price is None:
+                        error_count += 1
+                        if error_count >= max_errors:
+                            logger.error(f"❌ Прекращаем мониторинг {signal.symbol} - символ не найден на биржах")
+
+                            # Сохраняем в историю с причиной ошибки
+                            await self.save_to_history(signal_id, "symbol_not_found", 0)
+
+                            # Удаляем из активных
+                            if signal_id in self.active_signals:
+                                del self.active_signals[signal_id]
+                            break
+
+                        await asyncio.sleep(10)
+                        continue
+
+                    # Сброс счетчика ошибок
+                    error_count = 0
+
+                    # Рассчитываем PnL
+                    pnl_percent = 0
+                    if signal.entry_prices:
+                        entry_price = signal.entry_prices[0]
+                        if signal.direction == "LONG":
+                            pnl_percent = ((current_price - entry_price) / entry_price) * 100
+                            # Проверяем тейк-профиты
+                            for i, tp in enumerate(signal.take_profits):
+                                if current_price >= tp and i not in reached_tps:
+                                    logger.info(f"🎯 ДОСТИГНУТ ТЕЙК-ПРОФИТ #{i + 1} для {signal.symbol}: {tp}")
+                                    reached_tps.add(i)
+                        else:  # SHORT
+                            pnl_percent = ((entry_price - current_price) / entry_price) * 100
+                            for i, tp in enumerate(signal.take_profits):
+                                if current_price <= tp and i not in reached_tps:
+                                    logger.info(f"🎯 ДОСТИГНУТ ТЕЙК-ПРОФИТ #{i + 1} для {signal.symbol}: {tp}")
+                                    reached_tps.add(i)
+
+                    # 🔥 ОБНОВЛЯЕМ ДАННЫЕ В TRADING_DATA
+                    signal_data = {
+                        'signal_id': signal_id,
+                        'symbol': signal.symbol,
+                        'direction': signal.direction,
+                        'entry_prices': signal.entry_prices,
+                        'limit_prices': signal.limit_prices,
+                        'take_profits': signal.take_profits,
+                        'stop_loss': signal.stop_loss,
+                        'leverage': signal.leverage,
+                        'margin': signal.margin,
+                        'source': signal.source,
+                        'pnl_percent': pnl_percent,
+                        'reached_tps': list(reached_tps),
+                        'exchange': exchange_used,
+                        'timestamp': signal.timestamp,
+                        'entry_executed': entry_executed
+                    }
+                    trading_data.update_signal_data(signal_data)
+
+                    # Обновляем ценовые данные
+                    price_data = {
+                        'current_price': current_price,
+                        'entry_price': signal.entry_prices[0] if signal.entry_prices else current_price,
+                        'pnl_percent': pnl_percent,
+                        'timestamp': signal.timestamp,
+                        'exchange': exchange_used,
+                        'entry_executed': entry_executed
+                    }
+                    trading_data.update_price_data(signal.symbol, price_data)
+
+                    # Логируем в консоль (раз в 30 секунд чтобы не засорять логи)
+                    if int(time.time()) % 30 == 0:
+                        status = "🟢" if pnl_percent > 0 else "🔴"
+                        logger.info(f"{status} {signal.symbol}: {pnl_percent:+.2f}% | Цена: {current_price}")
+
+                    # Проверяем завершение сделки
+                    if len(reached_tps) == len(signal.take_profits) and signal.take_profits:
+                        logger.info(f"✅ ВСЕ ТЕЙК-ПРОФИТЫ ДОСТИГНУТЫ для {signal.symbol}")
+                        await self.save_to_history(signal_id, "all_take_profits", current_price)
+                        if signal_id in self.active_signals:
+                            del self.active_signals[signal_id]
                         break
-                    await asyncio.sleep(10)
-                    continue
 
-                # Сброс счетчика ошибок
-                error_count = 0
+                    if signal.stop_loss:
+                        if (signal.direction == "LONG" and current_price <= signal.stop_loss) or \
+                                (signal.direction == "SHORT" and current_price >= signal.stop_loss):
+                            logger.info(f"🛑 ДОСТИГНУТ СТОП-ЛОСС для {signal.symbol}: {signal.stop_loss}")
+                            await self.save_to_history(signal_id, "stop_loss", current_price)
+                            if signal_id in self.active_signals:
+                                del self.active_signals[signal_id]
+                            break
 
-                # Рассчитываем PnL
-                pnl_percent = 0
-                if signal.entry_prices:
-                    entry_price = signal.entry_prices[0]
-                    if signal.direction == "LONG":
-                        pnl_percent = ((current_price - entry_price) / entry_price) * 100
-                        # Проверяем тейк-профиты
-                        for i, tp in enumerate(signal.take_profits):
-                            if current_price >= tp and i not in reached_tps:
-                                logger.info(f"🎯 ДОСТИГНУТ ТЕЙК-ПРОФИТ #{i + 1} для {signal.symbol}: {tp}")
-                                reached_tps.add(i)
-                    else:  # SHORT
-                        pnl_percent = ((entry_price - current_price) / entry_price) * 100
-                        for i, tp in enumerate(signal.take_profits):
-                            if current_price <= tp and i not in reached_tps:
-                                logger.info(f"🎯 ДОСТИГНУТ ТЕЙК-ПРОФИТ #{i + 1} для {signal.symbol}: {tp}")
-                                reached_tps.add(i)
+                    await asyncio.sleep(5)
 
-                # 🔥 ОБНОВЛЯЕМ ДАННЫЕ В TRADING_DATA
-                signal_data = {
-                    'signal_id': signal_id,
-                    'symbol': signal.symbol,
-                    'direction': signal.direction,
-                    'entry_prices': signal.entry_prices,
-                    'limit_prices': signal.limit_prices,
-                    'take_profits': signal.take_profits,
-                    'stop_loss': signal.stop_loss,
-                    'leverage': signal.leverage,
-                    'margin': signal.margin,
-                    'source': signal.source,
-                    'pnl_percent': pnl_percent,
-                    'reached_tps': list(reached_tps),
-                    'exchange': exchange_used,
-                    'timestamp': signal.timestamp,
-                    'entry_executed': entry_executed
-                }
-                trading_data.update_signal_data(signal_data)
-
-                # Обновляем ценовые данные
-                price_data = {
-                    'current_price': current_price,
-                    'entry_price': signal.entry_prices[0] if signal.entry_prices else current_price,
-                    'pnl_percent': pnl_percent,
-                    'timestamp': signal.timestamp,
-                    'exchange': exchange_used,
-                    'entry_executed': entry_executed
-                }
-                trading_data.update_price_data(signal.symbol, price_data)
-
-                # Логируем в консоль
-                status = "🟢" if pnl_percent > 0 else "🔴"
-                logger.info(f"{status} {signal.symbol}: {pnl_percent:+.2f}% | Цена: {current_price}")
-
-                # Проверяем завершение сделки
-                if len(reached_tps) == len(signal.take_profits) and signal.take_profits:
-                    logger.info(f"✅ ВСЕ ТЕЙК-ПРОФИТЫ ДОСТИГНУТЫ для {signal.symbol}")
-                    await self.save_to_history(signal_id, "all_take_profits", current_price)
-                    del self.active_signals[signal_id]
+                except asyncio.CancelledError:
+                    logger.info(f"🔄 Мониторинг {signal_id} отменен")
                     break
-
-                if signal.stop_loss:
-                    if (signal.direction == "LONG" and current_price <= signal.stop_loss) or \
-                            (signal.direction == "SHORT" and current_price >= signal.stop_loss):
-                        logger.info(f"🛑 ДОСТИГНУТ СТОП-ЛОСС для {signal.symbol}: {signal.stop_loss}")
-                        await self.save_to_history(signal_id, "stop_loss", current_price)
-                        del self.active_signals[signal_id]
-                        break
-
-                await asyncio.sleep(5)
+                except Exception as e:
+                    logger.error(f"⚠️  Ошибка в цикле мониторинга {signal.symbol}: {e}")
+                    error_count += 1
+                    await asyncio.sleep(5)
 
         except Exception as e:
-            logger.error(f"❌ Ошибка мониторинга {signal.symbol}: {e}")
+            logger.error(f"❌ Критическая ошибка мониторинга {signal.symbol}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        finally:
+            # Очищаем ресурсы если сигнал еще активен
+            if signal_id in self.active_signals:
+                logger.warning(f"⚠️  Мониторинг {signal_id} завершился неожиданно")
+                # Можно отправить уведомление админу о проблеме
 
     async def save_to_history(self, signal_id: str, close_reason: str, close_price: float):
         """Сохраняет сделку в историю и удаляет из активных"""
@@ -1250,7 +1549,24 @@ class TelethonTradingBot:
 
         logger.info(f"📝 Сделка {signal.symbol} добавлена в историю с причиной: {close_reason}")
 
+        # Удаляем из активных
+        if signal_id in self.active_signals:
+            del self.active_signals[signal_id]
+
 
 async def run_telethon_bot():
-    bot = TelethonTradingBot()
-    await bot.start()
+    """Запускает Telethon бота"""
+    try:
+        bot = TelethonTradingBot()
+        await bot.start()
+    except KeyboardInterrupt:
+        logger.info("🛑 Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка запуска бота: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+
+if __name__ == "__main__":
+    # Запуск бота
+    asyncio.run(run_telethon_bot())

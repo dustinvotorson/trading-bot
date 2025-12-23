@@ -1217,41 +1217,42 @@ class TelethonTradingBot:
         signal = self.active_signals[signal_id]
 
         # Получаем текущую цену для расчета PnL
-        current_price, exchange_used = await self.price_cache.get_price(signal.symbol)
+        current_price, exchange_used = await multi_exchange.get_current_price(signal.symbol)
 
-        if current_price and signal.entry_prices:
+        pnl_percent = None
+        reached_tps = []
+
+        if current_price is not None and signal.entry_prices:
             entry_price = signal.entry_prices[0]
-
-            # Рассчитываем PnL
             if signal.direction == "LONG":
                 pnl_percent = ((current_price - entry_price) / entry_price) * 100
             else:
                 pnl_percent = ((entry_price - current_price) / entry_price) * 100
 
-            # Пересчитываем достигнутые тейк-профиты
-            reached_tps = []
-            for i, tp in enumerate(signal.take_profits):
+            for i, tp in enumerate(signal.take_profits or []):
                 if (signal.direction == "LONG" and current_price >= tp) or \
                         (signal.direction == "SHORT" and current_price <= tp):
                     reached_tps.append(i)
 
-            # Обновляем данные в веб-интерфейсе
-            signal_data = {
-                'signal_id': signal_id,
-                'symbol': signal.symbol,
-                'direction': signal.direction,
-                'entry_prices': signal.entry_prices,
-                'take_profits': signal.take_profits,
-                'stop_loss': signal.stop_loss,
-                'leverage': signal.leverage,
-                'margin': signal.margin,
-                'source': signal.source,
-                'pnl_percent': pnl_percent,
-                'reached_tps': reached_tps,
-                'exchange': exchange_used,
-                'timestamp': signal.timestamp
-            }
-            trading_data.update_signal_data(signal_data)
+        signal_data = {
+            'signal_id': signal_id,
+            'symbol': signal.symbol,
+            'direction': signal.direction,
+            'entry_prices': signal.entry_prices or [],
+            'limit_prices': getattr(signal, "limit_prices", []) or [],
+            'take_profits': signal.take_profits or [],
+            'stop_loss': signal.stop_loss,
+            'leverage': signal.leverage,
+            'margin': signal.margin,
+            'source': signal.source,
+            'pnl_percent': pnl_percent,
+            'reached_tps': reached_tps,
+            'exchange': exchange_used,
+            'current_price': current_price,
+            'entry_executed': getattr(signal, "entry_executed", False),
+            'timestamp': signal.timestamp
+        }
+        trading_data.update_signal_data(signal_data)
 
     @private_only
     async def handle_dashboard_command(self, event):

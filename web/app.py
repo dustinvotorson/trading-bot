@@ -9,7 +9,7 @@ from typing import Dict, Any, List, Optional
 from collections import defaultdict
 from functools import lru_cache
 import traceback
-
+from functools import wraps
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
@@ -535,25 +535,19 @@ class RateLimiter:
 rate_limiter = RateLimiter(max_requests=60, window=60)  # 60 запросов в минуту
 
 
-def check_rate_limit():
+def check_rate_limit(f):
     """Декоратор для проверки rate limit"""
-
-    def decorator(f):
-        def wrapper(*args, **kwargs):
-            ip = request.remote_addr
-            if not rate_limiter.is_allowed(ip):
-                logger.warning(f"Rate limit exceeded for IP: {ip}")
-                return jsonify({
-                    'error': 'Too many requests',
-                    'message': 'Please try again later'
-                }), 429
-            return f(*args, **kwargs)
-
-        wrapper.__name__ = f.__name__
-        return wrapper
-
-    return decorator
-
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        ip = request.remote_addr
+        if not rate_limiter.is_allowed(ip):
+            logger.warning(f"Rate limit exceeded for IP: {ip}")
+            return jsonify({
+                'error': 'Too many requests',
+                'message': 'Please try again later'
+            }), 429
+        return f(*args, **kwargs)
+    return decorated_function
 
 @app.route('/')
 def index():

@@ -138,12 +138,7 @@ def private_only(func):
 
 class TelethonTradingBot:
     def __init__(self):
-        """
-        Инициализация клиента Telethon:
-        - имя сессии берём в порядке: config_telethon.SESSION_NAME -> .env SESSION_NAME -> "trading_session"
-        - прокси берём из proxy_settings.MT_PROXIES (random.choice). Если прокси нет — используем None (прямое подключение).
-        - proxy приводим к формату, который Telethon ожидает.
-        """
+        """Инициализация клиента Telethon"""
         self._setup_telethon_error_handler()
 
         # 1) Получаем имя сессии (файл сессии Telethon)
@@ -184,7 +179,12 @@ class TelethonTradingBot:
         proxy_arg = build_proxy_arg(raw_proxy)
 
         # 3) Создаём клиента Telethon
-        self.client = TelegramClient(session, API_ID, API_HASH, proxy=proxy_arg)
+        try:
+            self.client = TelegramClient(session, API_ID, API_HASH, proxy=proxy_arg)
+            logger.info("✅ Клиент Telethon создан успешно")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при создании клиента Telethon: {e}")
+            self.client = None
 
         # 4) Обычные поля класса
         self.active_signals: Dict[str, Any] = {}
@@ -198,9 +198,13 @@ class TelethonTradingBot:
         self.khrustalev_timeout = 180  # 3 минуты для объединения сигналов Хрусталева
         self.max_active_signals = 50  # Максимальное количество активных сигналов
 
+        # Флаг для отслеживания критических ошибок
+        self.event_loop_closed = False
+        self.restart_attempts = 0
+        self.max_restart_attempts = 3
+
         # Запускаем фоновые задачи
         asyncio.create_task(self._cleanup_tasks())
-
     def _setup_telethon_error_handler(self):
         """Настраивает обработчик ошибок Telethon"""
         try:
@@ -249,6 +253,11 @@ class TelethonTradingBot:
     async def handle_channel_message(self, event):
         """Обрабатывает сообщения из каналов с фильтрацией предварительных объявлений"""
         try:
+            # Проверяем, нет ли критических ошибок
+            if self.event_loop_closed:
+                logger.critical("❌ ОБРАБОТКА СООБЩЕНИЙ ПРИОСТАНОВЛЕНА: Цикл событий закрыт. Требуется перезапуск бота.")
+                return
+
             message_text = event.message.text
             chat_id = event.chat_id
 
@@ -284,11 +293,6 @@ class TelethonTradingBot:
                 return
 
             # 🔥 УНИВЕРСАЛЬНОЕ ПРАВИЛО: ЕСЛИ НЕТ ЦЕНЫ ВХОДА → СЧИТАЕМ РЫНОЧНЫМ
-            # Проверяем три варианта:
-            # 1. Парсер сам определил как рыночный (is_market = True)
-            # 2. Нет entry_prices и limit_prices
-            # 3. Есть тейк-профиты (значит это не предварительное объявление)
-
             is_market_condition = (
                     signal.is_market or  # Парсер определил как рынок
                     (not signal.entry_prices and not signal.limit_prices)  # Нет цен входа
@@ -299,24 +303,52 @@ class TelethonTradingBot:
                 signal.is_market = True  # Устанавливаем флаг
 
                 # Получаем текущую цену
-                current_price, exchange_used = await self.price_cache.get_price(signal.symbol)
-                if current_price:
-                    signal.entry_prices = [current_price]
-                    logger.info(
-                        f"💰 Рыночный вход - текущая цена {signal.symbol}: {current_price} (биржа: {exchange_used})")
-                else:
-                    logger.warning(
-                        f"⚠️  Не удалось получить цену для {signal.symbol}, пробуем альтернативный символ...")
+                try:
+                    current_price, exchange_used = await self.price_cache.get_price(signal.symbol)
 
-                    # Пробуем альтернативный формат (например, BCH вместо BCHUSDT)
-                    alt_symbol = signal.symbol.replace("USDT", "")
-                    current_price, exchange_used = await self.price_cache.get_price(alt_symbol)
+                    # Проверяем, не является ли ошибка критической (event loop closed)
+                    if exchange_used == "Event loop closed":
+                        logger.critical(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Цикл событий закрыт. Требуется перезапуск бота.")
+                        self.event_loop_closed = True
+
+                        # Пытаемся перезапустить цикл событий
+                        await self._handle_event_loop_error()
+                        return
+
                     if current_price:
                         signal.entry_prices = [current_price]
-                        logger.info(f"💰 Рыночный вход - альтернативная цена {alt_symbol}: {current_price}")
+                        logger.info(
+                            f"💰 Рыночный вход - текущая цена {signal.symbol}: {current_price} (биржа: {exchange_used})")
                     else:
-                        logger.warning(f"⚠️  Не удалось получить цену для {signal.symbol}, пропускаем сигнал")
+                        logger.warning(
+                            f"⚠️  Не удалось получить цену для {signal.symbol}, пробуем альтернативный символ...")
+
+                        # Пробуем альтернативный формат (например, BCH вместо BCHUSDT)
+                        alt_symbol = signal.symbol.replace("USDT", "")
+                        current_price, exchange_used = await self.price_cache.get_price(alt_symbol)
+
+                        # Проверяем, не является ли ошибка критической (event loop closed)
+                        if exchange_used == "Event loop closed":
+                            logger.critical(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Цикл событий закрыт. Требуется перезапуск бота.")
+                            self.event_loop_closed = True
+                            await self._handle_event_loop_error()
+                            return
+
+                        if current_price:
+                            signal.entry_prices = [current_price]
+                            logger.info(f"💰 Рыночный вход - альтернативная цена {alt_symbol}: {current_price}")
+                        else:
+                            logger.warning(f"⚠️  Не удалось получить цену для {signal.symbol}, пропускаем сигнал")
+                            return
+
+                except RuntimeError as e:
+                    if "Event loop is closed" in str(e) or "no running event loop" in str(e):
+                        logger.critical(f"❌ КРИТИЧЕСКАЯ ОШИБКА RUNTIME: {e}")
+                        self.event_loop_closed = True
+                        await self._handle_event_loop_error()
                         return
+                    else:
+                        raise
 
             # 🔥 КРИТИЧЕСКАЯ ПРОВЕРКА: Если после всех манипуляций все еще нет цены входа → пропускаем
             elif not signal.entry_prices and not signal.limit_prices:
@@ -365,10 +397,91 @@ class TelethonTradingBot:
             # Запускаем мониторинг цены для этого сигнала
             asyncio.create_task(self.monitor_signal(signal_id))
 
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e) or "no running event loop" in str(e):
+                logger.critical(f"❌ КРИТИЧЕСКАЯ ОШИБКА В ОБРАБОТКЕ СООБЩЕНИЯ: {e}")
+                self.event_loop_closed = True
+                await self._handle_event_loop_error()
+            else:
+                logger.error(f"❌ RuntimeError обработки сообщения: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
         except Exception as e:
             logger.error(f"❌ Ошибка обработки сообщения: {e}")
             import traceback
             logger.error(traceback.format_exc())
+
+    async def _handle_event_loop_error(self):
+        """Обрабатывает критическую ошибку event loop closed"""
+        logger.critical("🔄 Попытка восстановления после критической ошибки event loop...")
+
+        # Увеличиваем счетчик попыток перезапуска
+        self.restart_attempts += 1
+
+        if self.restart_attempts > self.max_restart_attempts:
+            logger.critical("🚫 Превышено максимальное количество попыток перезапуска. Бот остановлен.")
+
+            # Отправляем уведомление админу
+            await self._notify_admin_critical_error()
+
+            # Останавливаем бота
+            await self.client.disconnect()
+            raise SystemExit("Критическая ошибка: цикл событий закрыт")
+
+        try:
+            # Пытаемся восстановить цикл событий
+            await self._restart_event_loop()
+            self.event_loop_closed = False
+            logger.info("✅ Цикл событий восстановлен")
+        except Exception as e:
+            logger.critical(f"❌ Не удалось восстановить цикл событий: {e}")
+            await self._notify_admin_critical_error()
+            raise
+
+    async def _restart_event_loop(self):
+        """Перезапускает цикл событий и критические компоненты"""
+        logger.info("🔄 Перезапуск критических компонентов...")
+
+        # 1. Закрываем все текущие сессии
+        try:
+            await multi_exchange.close()
+        except:
+            pass
+
+        # 2. Создаем новый event loop если нужно
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                logger.info("🔄 Текущий цикл событий закрыт, создаем новый...")
+                asyncio.set_event_loop(asyncio.new_event_loop())
+        except:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+
+        # 3. Пересоздаем кэш цен
+        self.price_cache = PriceCache(ttl=5)
+
+        # 4. Пауза перед продолжением
+        await asyncio.sleep(2)
+
+        logger.info("✅ Критические компоненты перезапущены")
+
+    async def _notify_admin_critical_error(self):
+        """Отправляет уведомление админу о критической ошибке"""
+        try:
+            for admin_id in ADMINS:
+                try:
+                    await self.client.send_message(
+                        admin_id,
+                        f"🚨 **КРИТИЧЕСКАЯ ОШИБКА БОТА**\n\n"
+                        f"Обнаружена ошибка 'Event loop closed'.\n"
+                        f"Попыток перезапуска: {self.restart_attempts}/{self.max_restart_attempts}\n"
+                        f"Требуется ручное вмешательство!\n\n"
+                        f"Время: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                except:
+                    pass
+        except:
+            pass
 
     def is_valid_trading_signal(self, signal, message_text: str) -> bool:
         """Проверяет, является ли сообщение полноценным торговым сигналом - УЛУЧШЕННАЯ ВЕРСИЯ"""
@@ -1408,7 +1521,29 @@ class TelethonTradingBot:
         try:
             while signal_id in self.active_signals and error_count < max_errors:
                 try:
+                    # Проверяем, нет ли критических ошибок
+                    if self.event_loop_closed:
+                        logger.critical(f"❌ Мониторинг {signal.symbol} приостановлен: цикл событий закрыт")
+                        await asyncio.sleep(10)
+                        continue
+
                     current_price, exchange_used = await self.price_cache.get_price(signal.symbol)
+
+                    # Проверяем, не является ли ошибка критической
+                    if exchange_used == "Event loop closed":
+                        logger.critical(f"❌ КРИТИЧЕСКАЯ ОШИБКА при мониторинге {signal.symbol}: цикл событий закрыт")
+                        self.event_loop_closed = True
+
+                        # Сохраняем сигнал в историю с причиной ошибки
+                        await self.save_to_history(signal_id, "event_loop_error", 0)
+
+                        # Удаляем из активных
+                        if signal_id in self.active_signals:
+                            del self.active_signals[signal_id]
+
+                        # Пытаемся восстановиться
+                        await self._handle_event_loop_error()
+                        break
 
                     # Если не удалось получить цену
                     if current_price is None:
@@ -1503,6 +1638,16 @@ class TelethonTradingBot:
 
                     await asyncio.sleep(5)
 
+                except RuntimeError as e:
+                    if "Event loop is closed" in str(e) or "no running event loop" in str(e):
+                        logger.critical(f"❌ КРИТИЧЕСКАЯ ОШИБКА RUNTIME в мониторинге {signal.symbol}: {e}")
+                        self.event_loop_closed = True
+                        await self._handle_event_loop_error()
+                        break
+                    else:
+                        logger.error(f"⚠️  RuntimeError в цикле мониторинга {signal.symbol}: {e}")
+                        error_count += 1
+                        await asyncio.sleep(5)
                 except asyncio.CancelledError:
                     logger.info(f"🔄 Мониторинг {signal_id} отменен")
                     break
@@ -1511,6 +1656,13 @@ class TelethonTradingBot:
                     error_count += 1
                     await asyncio.sleep(5)
 
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e) or "no running event loop" in str(e):
+                logger.critical(f"❌ КРИТИЧЕСКАЯ ОШИБКА RUNTIME мониторинга {signal.symbol}: {e}")
+                self.event_loop_closed = True
+                await self._handle_event_loop_error()
+            else:
+                logger.error(f"❌ RuntimeError мониторинга {signal.symbol}: {e}")
         except Exception as e:
             logger.error(f"❌ Критическая ошибка мониторинга {signal.symbol}: {e}")
             import traceback
@@ -1519,7 +1671,6 @@ class TelethonTradingBot:
             # Очищаем ресурсы если сигнал еще активен
             if signal_id in self.active_signals:
                 logger.warning(f"⚠️  Мониторинг {signal_id} завершился неожиданно")
-                # Можно отправить уведомление админу о проблеме
 
     async def save_to_history(self, signal_id: str, close_reason: str, close_price: float):
         """Сохраняет сделку в историю и удаляет из активных"""

@@ -87,6 +87,48 @@ class BinancePublicAPI:
             logger.error(f"❌ Ошибка поиска альтернатив для {base_symbol}: {e}")
             return []
 
+    async def is_symbol_valid(self, symbol: str) -> bool:
+        """Проверяет, существует ли символ на Binance с улучшенной диагностикой"""
+        try:
+            normalized_symbol = self.normalize_symbol(symbol)
+
+            # Если уже проверяли этот символ, используем кеш
+            if normalized_symbol in self.valid_symbols_cache:
+                return True
+
+            session = await self.get_session()
+            url = f"{self.base_url}/ticker/price?symbol={normalized_symbol}"
+
+            async with session.get(url) as response:
+                if response.status == 200:
+                    self.valid_symbols_cache.add(normalized_symbol)
+                    logger.info(f"✅ Символ {normalized_symbol} валиден")
+                    return True
+                else:
+                    # Пробуем найти альтернативные котируемые активы
+                    alternative_symbols = await self.find_alternative_symbols(symbol)
+                    if alternative_symbols:
+                        logger.info(f"🔍 Найдены альтернативы для {symbol}: {alternative_symbols}")
+                        # Используем первую найденную альтернативу
+                        best_alternative = alternative_symbols[0]
+                        self.valid_symbols_cache.add(best_alternative)
+                        logger.info(f"🎯 Используем альтернативу: {best_alternative}")
+                        return True
+                    else:
+                        logger.warning(f"🚫 Символ {normalized_symbol} невалиден: HTTP {response.status}")
+                        return False
+
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e) or "no running event loop" in str(e):
+                logger.critical(f"❌ Binance: КРИТИЧЕСКАЯ ОШИБКА Event loop при проверке символа {symbol}")
+                raise  # Пробрасываем выше для обработки в multi_exchange
+            else:
+                logger.error(f"❌ Binance: RuntimeError проверки символа {symbol}: {e}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки символа {symbol}: {e}")
+            return False
+
     async def get_current_price(self, symbol: str) -> Optional[float]:
         """Получает текущую цену символа через публичный API с поддержкой альтернатив"""
         try:
@@ -120,6 +162,13 @@ class BinancePublicAPI:
                     logger.error(f"❌ Ошибка получения цены для {normalized_symbol}: HTTP {response.status}")
                     return None
 
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e) or "no running event loop" in str(e):
+                logger.critical(f"❌ Binance: КРИТИЧЕСКАЯ ОШИБКА Event loop при получении цены {symbol}")
+                raise
+            else:
+                logger.error(f"❌ Binance: RuntimeError получения цены {symbol}: {e}")
+                return None
         except aiohttp.ClientError as e:
             logger.error(f"❌ Сетевая ошибка для {symbol}: {e}")
             return None

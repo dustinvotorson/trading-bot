@@ -230,6 +230,22 @@ class AdvancedParser:
         """
         Извлекает торговый символ из текста
         """
+        FORBIDDEN = {
+            "PUMP", "LONG", "SHORT", "SIGNAL", "ENTRY", "TARGET", "TARGETS",
+            "TP", "SL", "STOP", "BUY", "SELL",
+            "ТОЧКА", "ВХОД", "ТЕЙК", "ТЕЙКИ", "ЦЕЛИ", "ФИКСАЦИИ", "ДОБОР",
+            "МАРЖА", "ПЛЕЧО", "УВЕДОМЛЮ", "КЛАБ", "ПРАЙВАТ", "TG", "ТГ",
+            "AVAX", "PEPE"  # добавляем сами символы, которые могут быть в тексте как слова
+        }
+
+        def normalize_symbol(sym: str) -> str:
+            """Нормализует символ: убирает все не-буквы/цифры, приводит к верхнему регистру"""
+            return re.sub(r'[^A-Z0-9]', '', sym.upper())
+
+        text_lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
+        upper_text = text.upper()
+
+        # 1. Основные паттерны из оригинальной функции
         patterns = [
             r'\b([A-Z]{2,10}/[A-Z]{3,5})\b',  # BTC/USDT
             r'\b([A-Z]{2,10}-[A-Z]{3,5})\b',  # BTC-USDT
@@ -248,9 +264,81 @@ class AdvancedParser:
                 symbol = symbol.replace('/', '').replace('-', '')
                 if not symbol.endswith('USDT') and len(symbol) <= 10:
                     symbol += 'USDT'
-                logger.info(f"Извлечен символ: {symbol}")
+
+                # Проверяем, не является ли запрещенным словом
+                if normalize_symbol(symbol) in FORBIDDEN:
+                    continue
+
+                logger.info(f"Извлечен символ (основной паттерн): {symbol}")
                 return symbol
 
+        # 2. Fallback: строка вида "Avax Short" / "AVAX LONG" - ищем в первых 6 строках
+        for i, line in enumerate(text_lines[:6]):
+            line_up = line.upper()
+
+            # Проверяем, есть ли в строке LONG/SHORT
+            if " LONG" in line_up or " SHORT" in line_up:
+                # Разбиваем строку на слова
+                words = re.split(r'\s+', line_up)
+
+                # Ищем первое слово перед LONG/SHORT
+                for idx, word in enumerate(words):
+                    if word == "LONG" or word == "SHORT":
+                        if idx > 0:
+                            candidate = normalize_symbol(words[idx - 1])
+                            if (2 <= len(candidate) <= 15 and
+                                    candidate not in FORBIDDEN and
+                                    not any(forbidden in candidate for forbidden in FORBIDDEN)):
+                                symbol = f"{candidate}USDT"
+                                logger.info(f"Извлечен символ (fallback LONG/SHORT): {symbol} из строки: '{line}'")
+                                return symbol
+
+        # 3. Fallback: ищем любое слово из 2-10 символов в начале первых строк
+        for line in text_lines[:3]:
+            # Разбиваем на слова
+            words = re.findall(r'\b[A-Za-z0-9]{2,15}\b', line)
+            for word in words:
+                candidate = normalize_symbol(word)
+                if (2 <= len(candidate) <= 10 and
+                        candidate not in FORBIDDEN and
+                        not candidate.isdigit() and  # не чисто цифры
+                        not any(forbidden in candidate for forbidden in FORBIDDEN)):
+
+                    # Проверяем контекст - есть ли рядом торговые термины
+                    line_up = line.upper()
+                    has_trading_context = any(
+                        term in line_up for term in [
+                            'ENTRY', 'TP', 'SL', 'STOP', 'TAKE', 'PROFIT',
+                            'ТОЧКА', 'ТЕЙК', 'СТОП', 'ЦЕЛЬ', 'ВХОД'
+                        ]
+                    )
+
+                    if has_trading_context:
+                        symbol = f"{candidate}USDT"
+                        logger.info(f"Извлечен символ (fallback контекст): {symbol} из строки: '{line}'")
+                        return symbol
+
+        # 4. Fallback: хэштег без USDT типа "#AVAX"
+        m = re.search(r'[#\$]([A-Z0-9]{2,15})\b', upper_text)
+        if m:
+            candidate = normalize_symbol(m.group(1))
+            if candidate and candidate not in FORBIDDEN:
+                if not candidate.endswith('USDT'):
+                    candidate += 'USDT'
+                logger.info(f"Извлечен символ (хэштег): {candidate}")
+                return candidate
+
+        # 5. Fallback: ищем слово перед "Short" или "Long" (регистронезависимо)
+        pattern_fallback = re.compile(r'\b([A-Za-z0-9]{2,15})\s+(?:Short|Long)\b', re.IGNORECASE)
+        match = pattern_fallback.search(text)
+        if match:
+            candidate = normalize_symbol(match.group(1))
+            if candidate and candidate not in FORBIDDEN:
+                symbol = f"{candidate}USDT"
+                logger.info(f"Извлечен символ (regex fallback): {symbol}")
+                return symbol
+
+        logger.warning(f"Символ не распознан в тексте: {text[:200]}...")
         return "UNKNOWN"
 
     @staticmethod
@@ -592,13 +680,44 @@ class AdvancedParser:
         """
         Парсит торговый сигнал из текста сообщения
         """
+        # Логируем входящий текст для отладки
+        logger.info(f"Парсим сигнал из источника '{source}': {text[:200]}...")
+
         signal = TradeSignal()
         signal.source = source
         signal.timestamp = time.time()
         signal.original_text = text
 
-        # Определяем символ
+        # Определяем символ с улучшенным детектором
         signal.symbol = AdvancedParser.extract_symbol(text)
+
+        # Логируем результат извлечения символа
+        logger.info(f"Результат извлечения символа: {signal.symbol}")
+
+        # Если символ UNKNOWN, пробуем дополнительные методы
+        if signal.symbol == "UNKNOWN":
+            # Для private club ищем слово перед SHORT/LONG в первых строках
+            if "прайват клаб" in source.lower() or "private club" in source.lower():
+                lines = text.split('\n')
+                for line in lines[:3]:
+                    line_upper = line.upper()
+                    if "SHORT" in line_upper or "LONG" in line_upper:
+                        # Разбиваем на слова
+                        words = re.findall(r'\b[A-Za-z0-9]+\b', line_upper)
+                        for i, word in enumerate(words):
+                            if word == "SHORT" or word == "LONG":
+                                if i > 0:
+                                    candidate = words[i - 1]
+                                    # Проверяем, что это не число (1000PEPE обрабатывается отдельно)
+                                    if not candidate.isdigit() and len(candidate) >= 2:
+                                        # Очищаем от цифр в начале (1000PEPE -> PEPE)
+                                        clean_candidate = re.sub(r'^\d+', '', candidate)
+                                        if 2 <= len(clean_candidate) <= 10:
+                                            signal.symbol = f"{clean_candidate}USDT"
+                                            logger.info(f"Извлечен символ из контекста Private Club: {signal.symbol}")
+                                            break
+                        if signal.symbol != "UNKNOWN":
+                            break
 
         # Определяем направление
         signal.direction = AdvancedParser.extract_direction(text)
@@ -625,6 +744,30 @@ class AdvancedParser:
         market_keywords = ['по рынку', 'market', 'маркет', 'рынок', 'market(']
         if any(keyword in text.lower() for keyword in market_keywords):
             signal.is_market = True
+
+        # Определяем тейк-профиты (повторно для логирования)
+        logger.info(f"После parse_take_profits: {signal.take_profits}")
+
+        # Проверяем специфичные паттерны для источника
+        source_specific_data = AdvancedParser.detect_source_specific_pattern(text, source)
+        logger.info(f"source_specific_data для {source}: {source_specific_data}")
+
+        for key, value in source_specific_data.items():
+            if hasattr(signal, key):
+                # Для entry_prices добавляем, если нет
+                if key == 'entry_prices' and value and not signal.entry_prices:
+                    signal.entry_prices = value
+                # Для take_profits заменяем полностью
+                elif key == 'take_profits' and value:
+                    logger.info(f"ПЕРЕЗАПИСЫВАЕМ take_profits: {value}")
+                    signal.take_profits = value
+                elif key == 'stop_loss' and value:
+                    signal.stop_loss = value
+                elif key == 'limit_prices' and value:
+                    signal.limit_prices = value
+
+        logger.info(f"После source_specific_data: {signal.take_profits}")
+
         # 🔥 ВАЖНОЕ ИЗМЕНЕНИЕ: ФИЛЬТРАЦИЯ ТЕЙК-ПРОФИТОВ ПО ЦЕНЕ ВХОДА
         # Но только если тейк-профитов больше 0
         if signal.entry_prices and signal.take_profits and len(signal.take_profits) > 0:
@@ -647,35 +790,6 @@ class AdvancedParser:
 
             if len(signal.take_profits) != original_count:
                 logger.info(f"Отфильтрованы тейк-профиты: было {original_count}, стало {len(signal.take_profits)}")
-        # Проверяем специфичные паттерны для источника
-        source_specific_data = AdvancedParser.detect_source_specific_pattern(text, source)
-        for key, value in source_specific_data.items():
-            if hasattr(signal, key):
-                # Для entry_prices добавляем, если нет
-                if key == 'entry_prices' and value and not signal.entry_prices:
-                    signal.entry_prices = value
-                # Для take_profits заменяем полностью
-                elif key == 'take_profits' and value:
-                    signal.take_profits = value
-                elif key == 'stop_loss' and value:
-                    signal.stop_loss = value
-                elif key == 'limit_prices' and value:
-                    signal.limit_prices = value
-
-        # 🔥 ВАЖНОЕ ИЗМЕНЕНИЕ: ФИЛЬТРАЦИЯ ТЕЙК-ПРОФИТОВ ПО ЦЕНЕ ВХОДА
-        if signal.entry_prices and signal.take_profits:
-            entry_price = signal.entry_prices[0]
-            logger.info(f"Фильтруем тейк-профиты по входу {entry_price} для {signal.direction}")
-
-            original_tps = signal.take_profits.copy()
-            signal.take_profits = AdvancedParser.filter_take_profits_by_entry(
-                signal.direction,
-                entry_price,
-                signal.take_profits
-            )
-
-            if len(signal.take_profits) != len(original_tps):
-                logger.info(f"Отфильтрованы тейк-профиты: было {len(original_tps)}, стало {len(signal.take_profits)}")
 
         # Для CryptoFutures: если есть limit_prices и нет entry_prices, копируем
         if "CryptoFutures" in source and signal.limit_prices and not signal.entry_prices:
@@ -693,8 +807,36 @@ class AdvancedParser:
                 except (ValueError, IndexError):
                     pass
 
-        # Логируем результат
-        logger.info(f"✅ СИГНАЛ ПАРСЕРА:")
+        # 🔥 ДОПОЛНИТЕЛЬНАЯ ФИЛЬТРАЦИЯ: убираем тейк-профиты, которые слишком близко к входу
+        if signal.entry_prices and signal.take_profits:
+            entry_price = signal.entry_prices[0]
+            filtered_tps = []
+
+            for tp in signal.take_profits:
+                # Рассчитываем разницу в процентах
+                diff_percent = abs(tp - entry_price) / entry_price * 100
+
+                # Для SHORT: тейк должен быть МЕНЬШЕ входа минимум на 0.5%
+                if signal.direction == "SHORT" and tp < entry_price and diff_percent >= 0.5:
+                    filtered_tps.append(tp)
+                # Для LONG: тейк должен быть БОЛЬШЕ входа минимум на 0.5%
+                elif signal.direction == "LONG" and tp > entry_price and diff_percent >= 0.5:
+                    filtered_tps.append(tp)
+
+            if filtered_tps:
+                # Сохраняем сортировку
+                if signal.direction == "SHORT":
+                    filtered_tps.sort(reverse=True)
+                else:
+                    filtered_tps.sort()
+
+                if len(filtered_tps) != len(signal.take_profits):
+                    logger.info(
+                        f"Убраны тейк-профиты слишком близкие к входу: было {len(signal.take_profits)}, стало {len(filtered_tps)}")
+                    signal.take_profits = filtered_tps
+
+        # Логируем финальный результат
+        logger.info(f"✅ ФИНАЛЬНЫЙ СИГНАЛ:")
         logger.info(f"   Символ: {signal.symbol}")
         logger.info(f"   Направление: {signal.direction}")
         logger.info(f"   Входы: {signal.entry_prices}")
@@ -705,29 +847,9 @@ class AdvancedParser:
         logger.info(f"   Маржа: {signal.margin}")
         logger.info(f"   Источник: {signal.source}")
         logger.info(f"   Рыночный вход: {signal.is_market}")
-        # Определяем тейк-профиты
-        signal.take_profits = AdvancedParser.parse_take_profits(text)
-        logger.info(f"После parse_take_profits: {signal.take_profits}")
+        logger.info(f"   Время: {datetime.fromtimestamp(signal.timestamp).strftime('%H:%M:%S')}")
+        logger.info("-" * 60)
 
-        # Проверяем специфичные паттерны для источника
-        source_specific_data = AdvancedParser.detect_source_specific_pattern(text, source)
-        logger.info(f"source_specific_data для {source}: {source_specific_data}")
-
-        for key, value in source_specific_data.items():
-            if hasattr(signal, key):
-                # Для entry_prices добавляем, если нет
-                if key == 'entry_prices' and value and not signal.entry_prices:
-                    signal.entry_prices = value
-                # Для take_profits заменяем полностью
-                elif key == 'take_profits' and value:
-                    logger.info(f"ПЕРЕЗАПИСЫВАЕМ take_profits: {value}")
-                    signal.take_profits = value
-                elif key == 'stop_loss' and value:
-                    signal.stop_loss = value
-                elif key == 'limit_prices' and value:
-                    signal.limit_prices = value
-
-        logger.info(f"После source_specific_data: {signal.take_profits}")
         return signal
 
     @staticmethod

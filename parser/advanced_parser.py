@@ -246,18 +246,28 @@ class AdvancedParser:
         text_lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
         upper_text = text.upper()
 
-        # 1. Основные паттерны из оригинальной функции
+        # 1. Основные паттерны - ВАЖНО: порядок имеет значение!
         patterns = [
-            # Сначала пробуем найти "Avax Short" или "PEPE SHORT" (слово перед SHORT/LONG)
-            r'\b([A-Za-z0-9]{2,15})\s+(?:SHORT|LONG)\b',  # Avax Short или PEPE SHORT
-            r'\b([A-Z]{2,10}/[A-Z]{3,5})\b',  # BTC/USDT
+            # 1.1 Сначала ищем формат с косой чертой или дефисом
+            r'\b([A-Z]{2,10}/[A-Z]{3,5})\b',  # BTC/USDT или TAO/USDT
             r'\b([A-Z]{2,10}-[A-Z]{3,5})\b',  # BTC-USDT
-            r'\$([A-Z]{2,10})\b',  # $BTC
-            r'#([A-Z]{2,10})\b',  # #BTCUSDT
-            r'\b([A-Z]{2,10}USDT)\b',  # BTCUSDT
-            r'(\d+[A-Z]{2,10})\s+(?:SHORT|LONG)',  # 1000PEPE SHORT
             r'🎤([A-Z]+/[A-Z]+)',  # 🎤DAM/USDT
-            r'\$\s*([A-Z]{2,10})\b',  # $ Zec
+
+            # 1.2 Хэштеги и доллары
+            r'#([A-Z]{2,10})\b',  # #BTCUSDT или #INJUSDT
+            r'\$([A-Z]{2,10})\b',  # $BTC
+            r'\$\s*([A-Z]{2,10})\b',  # $ Zec (с пробелом)
+
+            # 1.3 Уже готовые USDT пары
+            r'\b([A-Z]{2,10}USDT)\b',  # BTCUSDT или INJUSDT
+
+            # 1.4 Цифра + тикер перед SHORT/LONG (1000PEPE SHORT)
+            r'(\d+[A-Z]{2,10})\s+(?:SHORT|LONG)',  # 1000PEPE SHORT
+
+            # 1.5 Тикер перед SHORT/LONG (Avax Short) - НОВЫЙ ПАТТЕРН НИЖЕ
+            # r'\b([A-Za-z0-9]{2,15})\s+(?:SHORT|LONG)\b',  # Avax Short - УБРАН, чтобы не ловил USDT LONG
+
+            # 1.6 Тикер в конце строки
             r'\b([A-Z]{2,10})\s*$',  # AVAX в конце строки
         ]
 
@@ -267,107 +277,73 @@ class AdvancedParser:
                 symbol = match.group(1).upper()
                 symbol = symbol.replace('/', '').replace('-', '')
 
-                # Обработка для паттерна с цифрами (1000PEPE -> PEPE)
-                if re.match(r'^\d+[A-Z]+$', symbol):
-                    # Удаляем начальные цифры
-                    symbol = re.sub(r'^\d+', '', symbol)
-
-                if not symbol.endswith('USDT') and len(symbol) <= 10:
-                    symbol += 'USDT'
+                # Для паттерна с цифрами (1000PEPE -> 1000PEPE, не обрезаем цифры!)
+                if pattern == r'(\d+[A-Z]{2,10})\s+(?:SHORT|LONG)':
+                    # Для 1000PEPE SHORT оставляем как есть
+                    if not symbol.endswith('USDT'):
+                        symbol = f"{symbol}USDT"
+                else:
+                    # Для остальных: если не заканчивается на USDT и достаточно короткий
+                    if not symbol.endswith('USDT') and len(symbol) <= 10:
+                        symbol += 'USDT'
 
                 # Проверяем, не является ли запрещенным словом
-                if normalize_symbol(symbol) in FORBIDDEN:
+                if normalize_symbol(symbol.replace('USDT', '')) in FORBIDDEN:
                     logger.debug(f"Символ {symbol} в списке запрещенных, пропускаем")
                     continue
 
-                logger.info(f"Извлечен символ (основной паттерн): {symbol}")
+                logger.info(f"Извлечен символ (паттерн: {pattern[:50]}...): {symbol}")
                 return symbol
 
-        # 2. Fallback: строка вида "Avax Short" / "AVAX LONG" - ищем в первых 6 строках
-        for i, line in enumerate(text_lines[:6]):
+        # 2. Специальный паттерн для "Avax Short" - только если в строке нет других символов
+        for line in text_lines[:6]:
             line_up = line.upper()
+            # Ищем "Avax Short" или "BTC Long" как отдельные слова
+            # Но не "USDT LONG" или другие запрещенные
+            words = re.split(r'\s+', line_up)
+            for i in range(len(words) - 1):
+                if words[i + 1] in ["SHORT", "LONG"]:
+                    candidate = normalize_symbol(words[i])
+                    # Проверяем, что это не запрещенное слово и не слишком короткое/длинное
+                    if (candidate not in FORBIDDEN and
+                            2 <= len(candidate) <= 15 and
+                            not any(forbidden in candidate for forbidden in FORBIDDEN)):
 
-            # Проверяем, есть ли в строке LONG/SHORT (как отдельное слово)
-            words_in_line = re.split(r'\s+', line_up)
-            for idx, word in enumerate(words_in_line):
-                if word == "LONG" or word == "SHORT":
-                    if idx > 0:
-                        candidate = normalize_symbol(words_in_line[idx - 1])
-                        # Удаляем начальные цифры если есть
-                        candidate = re.sub(r'^\d+', '', candidate)
-
-                        if (2 <= len(candidate) <= 15 and
-                                candidate not in FORBIDDEN and
-                                not any(forbidden in candidate for forbidden in FORBIDDEN)):
+                        # Исключаем случаи, где candidate это часть USDT пары
+                        if not line_up.endswith('USDT') and candidate != 'USDT':
                             symbol = f"{candidate}USDT"
-                            logger.info(f"Извлечен символ (fallback LONG/SHORT): {symbol} из строки: '{line}'")
+                            logger.info(f"Извлечен символ (слово перед SHORT/LONG): {symbol} из строки: '{line}'")
                             return symbol
 
-        # 3. Fallback: ищем любое слово из 2-10 символов в начале первых строк
+        # 3. Fallback: ищем слово, которое похоже на тикер (2-10 букв)
         for line in text_lines[:3]:
-            # Разбиваем на слова
-            words = re.findall(r'\b[A-Za-z0-9]{2,15}\b', line)
-            for word in words:
-                candidate = normalize_symbol(word)
-                # Удаляем начальные цифры
-                candidate = re.sub(r'^\d+', '', candidate)
-
-                if (2 <= len(candidate) <= 10 and
-                        candidate not in FORBIDDEN and
-                        not candidate.isdigit() and  # не чисто цифры
-                        not any(forbidden in candidate for forbidden in FORBIDDEN)):
-
-                    # Проверяем контекст - есть ли рядом торговые термины
-                    line_up = line.upper()
-                    has_trading_context = any(
-                        term in line_up for term in [
-                            'ENTRY', 'TP', 'SL', 'STOP', 'TAKE', 'PROFIT',
-                            'ТОЧКА', 'ТЕЙК', 'СТОП', 'ЦЕЛЬ', 'ВХОД'
-                        ]
-                    )
-
-                    if has_trading_context:
-                        symbol = f"{candidate}USDT"
-                        logger.info(f"Извлечен символ (fallback контекст): {symbol} из строки: '{line}'")
-                        return symbol
-
-        # 4. Fallback: хэштег без USDT типа "#AVAX"
-        m = re.search(r'[#\$]([A-Z0-9]{2,15})\b', upper_text)
-        if m:
-            candidate = normalize_symbol(m.group(1))
-            if candidate and candidate not in FORBIDDEN:
-                if not candidate.endswith('USDT'):
-                    candidate += 'USDT'
-                logger.info(f"Извлечен символ (хэштег): {candidate}")
-                return candidate
-
-        # 5. Fallback: ищем слово перед "Short" или "Long" (регистронезависимо)
-        pattern_fallback = re.compile(r'\b([A-Za-z0-9]{2,15})\s+(?:Short|Long)\b', re.IGNORECASE)
-        match = pattern_fallback.search(text)
-        if match:
-            candidate = normalize_symbol(match.group(1))
-            # Удаляем начальные цифры
-            candidate = re.sub(r'^\d+', '', candidate)
-
-            if candidate and candidate not in FORBIDDEN:
-                symbol = f"{candidate}USDT"
-                logger.info(f"Извлечен символ (regex fallback): {symbol}")
-                return symbol
-
-        # 6. Fallback: ищем первое слово в тексте, которое похоже на тикер
-        for line in text_lines[:2]:
-            # Ищем все слова, состоящие только из букв (2-10 символов)
+            # Ищем слова из 2-10 заглавных букв
             words = re.findall(r'\b[A-Z]{2,10}\b', line.upper())
             for word in words:
                 if word not in FORBIDDEN and 2 <= len(word) <= 10:
-                    # Проверяем, что это не просто английское слово
-                    common_words = {'THE', 'AND', 'FOR', 'ARE', 'NOT', 'ALL', 'BUT', 'FROM', 'WITH'}
+                    # Проверяем, что это не общее английское слово
+                    common_words = {'THE', 'AND', 'FOR', 'ARE', 'NOT', 'ALL', 'BUT', 'FROM', 'WITH', 'YOU', 'ARE'}
                     if word not in common_words:
-                        # Проверяем, не является ли это аббревиатурой
-                        if not word.isalpha():
-                            continue
                         symbol = f"{word}USDT"
-                        logger.info(f"Извлечен символ (первое слово): {symbol}")
+                        logger.info(f"Извлечен символ (fallback слово): {symbol} из строки: '{line}'")
+                        return symbol
+
+        # 4. Fallback: из контекста торговых терминов
+        for line in text_lines[:3]:
+            # Если в строке есть торговые термины, ищем любое слово из 2-10 символов
+            has_trading_terms = any(
+                term in line.upper() for term in [
+                    'ENTRY', 'TP', 'SL', 'STOP', 'TAKE', 'PROFIT',
+                    'ТОЧКА', 'ТЕЙК', 'СТОП', 'ЦЕЛЬ', 'ВХОД', 'ЦЕНА'
+                ]
+            )
+            if has_trading_terms:
+                words = re.findall(r'\b[A-Za-z]{2,10}\b', line)
+                for word in words:
+                    candidate = normalize_symbol(word)
+                    if candidate not in FORBIDDEN and 2 <= len(candidate) <= 10:
+                        symbol = f"{candidate}USDT"
+                        logger.info(f"Извлечен символ (контекст торговли): {symbol} из строки: '{line}'")
                         return symbol
 
         logger.warning(f"Символ не распознан в тексте: {text[:200]}...")
@@ -622,42 +598,66 @@ class AdvancedParser:
                 except ValueError:
                     pass
 
-        elif "прайват клаб" in source.lower() or "прайват" in source.lower():
+
+        elif "прайват клаб" in source.lower() or "private club" in source.lower():
+
             # Для Прайват клаб - специальный парсинг для столбика
+
             lines = text.split('\n')
 
             # Ищем точку входа
+
             for line in lines:
+
                 entry_match = re.search(r'Точка входа:\s*([\d.,]+)', line, re.IGNORECASE)
+
                 if entry_match:
+
                     try:
+
                         result['entry_prices'] = [float(entry_match.group(1).replace(',', '.'))]
+
                         break
+
                     except ValueError:
+
                         pass
 
             # Ищем цели в столбике
+
             tps = []
+
             in_tps_section = False
 
             for line in lines:
+
                 line_lower = line.lower()
 
-                if 'цели' in line_lower:
+                if 'цели' in line_lower or 'тейки' in line_lower:
                     in_tps_section = True
+
                     continue
 
                 if in_tps_section:
+
                     # Проверяем, не начался ли новый раздел
-                    if any(keyword in line_lower for keyword in ['закрытое', 'стоп', 'вход', 'плечо', 'маржа']):
+
+                    if any(keyword in line_lower for keyword in
+                           ['закрытое', 'стоп', 'вход', 'плечо', 'маржа', 'добор']):
                         break
 
-                    # Ищем число в строке
+                    # Ищем число в строке (может быть с $ или без)
+
                     match = re.search(r'([\d.,]+)', line)
+
                     if match:
+
                         try:
+
                             tps.append(float(match.group(1).replace(',', '.')))
+
                         except ValueError:
+
                             pass
 
             if tps:

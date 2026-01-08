@@ -228,14 +228,15 @@ class AdvancedParser:
     @staticmethod
     def extract_symbol(text: str) -> str:
         """
-        Извлекает торговый символ из текста
+        Извлекает торговый символ из текста с улучшенным fallback-детектором
         """
         FORBIDDEN = {
             "PUMP", "LONG", "SHORT", "SIGNAL", "ENTRY", "TARGET", "TARGETS",
             "TP", "SL", "STOP", "BUY", "SELL",
             "ТОЧКА", "ВХОД", "ТЕЙК", "ТЕЙКИ", "ЦЕЛИ", "ФИКСАЦИИ", "ДОБОР",
             "МАРЖА", "ПЛЕЧО", "УВЕДОМЛЮ", "КЛАБ", "ПРАЙВАТ", "TG", "ТГ",
-            "AVAX", "PEPE"  # добавляем сами символы, которые могут быть в тексте как слова
+            "ЗАКРЫТОЕ", "СООБЩЕСТВО", "PRIVATE", "CLUB", "УВЕДОМЛЮ", "ДОБОР",
+            "ВХОДА", "ТОЧКА", "ТЕЙКИ", "TEЙKИ"
         }
 
         def normalize_symbol(sym: str) -> str:
@@ -247,6 +248,8 @@ class AdvancedParser:
 
         # 1. Основные паттерны из оригинальной функции
         patterns = [
+            # Сначала пробуем найти "Avax Short" или "PEPE SHORT" (слово перед SHORT/LONG)
+            r'\b([A-Za-z0-9]{2,15})\s+(?:SHORT|LONG)\b',  # Avax Short или PEPE SHORT
             r'\b([A-Z]{2,10}/[A-Z]{3,5})\b',  # BTC/USDT
             r'\b([A-Z]{2,10}-[A-Z]{3,5})\b',  # BTC-USDT
             r'\$([A-Z]{2,10})\b',  # $BTC
@@ -255,6 +258,7 @@ class AdvancedParser:
             r'(\d+[A-Z]{2,10})\s+(?:SHORT|LONG)',  # 1000PEPE SHORT
             r'🎤([A-Z]+/[A-Z]+)',  # 🎤DAM/USDT
             r'\$\s*([A-Z]{2,10})\b',  # $ Zec
+            r'\b([A-Z]{2,10})\s*$',  # AVAX в конце строки
         ]
 
         for pattern in patterns:
@@ -262,11 +266,18 @@ class AdvancedParser:
             if match:
                 symbol = match.group(1).upper()
                 symbol = symbol.replace('/', '').replace('-', '')
+
+                # Обработка для паттерна с цифрами (1000PEPE -> PEPE)
+                if re.match(r'^\d+[A-Z]+$', symbol):
+                    # Удаляем начальные цифры
+                    symbol = re.sub(r'^\d+', '', symbol)
+
                 if not symbol.endswith('USDT') and len(symbol) <= 10:
                     symbol += 'USDT'
 
                 # Проверяем, не является ли запрещенным словом
                 if normalize_symbol(symbol) in FORBIDDEN:
+                    logger.debug(f"Символ {symbol} в списке запрещенных, пропускаем")
                     continue
 
                 logger.info(f"Извлечен символ (основной паттерн): {symbol}")
@@ -276,22 +287,21 @@ class AdvancedParser:
         for i, line in enumerate(text_lines[:6]):
             line_up = line.upper()
 
-            # Проверяем, есть ли в строке LONG/SHORT
-            if " LONG" in line_up or " SHORT" in line_up:
-                # Разбиваем строку на слова
-                words = re.split(r'\s+', line_up)
+            # Проверяем, есть ли в строке LONG/SHORT (как отдельное слово)
+            words_in_line = re.split(r'\s+', line_up)
+            for idx, word in enumerate(words_in_line):
+                if word == "LONG" or word == "SHORT":
+                    if idx > 0:
+                        candidate = normalize_symbol(words_in_line[idx - 1])
+                        # Удаляем начальные цифры если есть
+                        candidate = re.sub(r'^\d+', '', candidate)
 
-                # Ищем первое слово перед LONG/SHORT
-                for idx, word in enumerate(words):
-                    if word == "LONG" or word == "SHORT":
-                        if idx > 0:
-                            candidate = normalize_symbol(words[idx - 1])
-                            if (2 <= len(candidate) <= 15 and
-                                    candidate not in FORBIDDEN and
-                                    not any(forbidden in candidate for forbidden in FORBIDDEN)):
-                                symbol = f"{candidate}USDT"
-                                logger.info(f"Извлечен символ (fallback LONG/SHORT): {symbol} из строки: '{line}'")
-                                return symbol
+                        if (2 <= len(candidate) <= 15 and
+                                candidate not in FORBIDDEN and
+                                not any(forbidden in candidate for forbidden in FORBIDDEN)):
+                            symbol = f"{candidate}USDT"
+                            logger.info(f"Извлечен символ (fallback LONG/SHORT): {symbol} из строки: '{line}'")
+                            return symbol
 
         # 3. Fallback: ищем любое слово из 2-10 символов в начале первых строк
         for line in text_lines[:3]:
@@ -299,6 +309,9 @@ class AdvancedParser:
             words = re.findall(r'\b[A-Za-z0-9]{2,15}\b', line)
             for word in words:
                 candidate = normalize_symbol(word)
+                # Удаляем начальные цифры
+                candidate = re.sub(r'^\d+', '', candidate)
+
                 if (2 <= len(candidate) <= 10 and
                         candidate not in FORBIDDEN and
                         not candidate.isdigit() and  # не чисто цифры
@@ -333,10 +346,29 @@ class AdvancedParser:
         match = pattern_fallback.search(text)
         if match:
             candidate = normalize_symbol(match.group(1))
+            # Удаляем начальные цифры
+            candidate = re.sub(r'^\d+', '', candidate)
+
             if candidate and candidate not in FORBIDDEN:
                 symbol = f"{candidate}USDT"
                 logger.info(f"Извлечен символ (regex fallback): {symbol}")
                 return symbol
+
+        # 6. Fallback: ищем первое слово в тексте, которое похоже на тикер
+        for line in text_lines[:2]:
+            # Ищем все слова, состоящие только из букв (2-10 символов)
+            words = re.findall(r'\b[A-Z]{2,10}\b', line.upper())
+            for word in words:
+                if word not in FORBIDDEN and 2 <= len(word) <= 10:
+                    # Проверяем, что это не просто английское слово
+                    common_words = {'THE', 'AND', 'FOR', 'ARE', 'NOT', 'ALL', 'BUT', 'FROM', 'WITH'}
+                    if word not in common_words:
+                        # Проверяем, не является ли это аббревиатурой
+                        if not word.isalpha():
+                            continue
+                        symbol = f"{word}USDT"
+                        logger.info(f"Извлечен символ (первое слово): {symbol}")
+                        return symbol
 
         logger.warning(f"Символ не распознан в тексте: {text[:200]}...")
         return "UNKNOWN"
